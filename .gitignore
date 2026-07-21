@@ -2,6 +2,8 @@ build/bin/
 *.exe
 *.test
 coverage.out
+.gocache/
+.codegraph/
 
 frontend/dist/
 frontend/package.json.md5

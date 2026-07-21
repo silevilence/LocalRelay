@@ -2,49 +2,6 @@
 
 ## 📅 计划中
 
-- [x] **初始化项目目录与本地 Git 仓库**
-  - [x] 初始化 Go module，确定模块名与目录结构（cmd/、internal/、frontend/、docs/ 等）
-  - [x] 初始化本地 Git 仓库并创建 `.gitignore`
-    - 忽略构建产物、node_modules、本地数据库文件、IDE 配置
-  - [x] 提交初始 commit，包含 AGENTS.md、ROADMAP.md 与空目录结构
-
-- [x] **搭建 Wails 项目骨架**
-  - [x] 使用 Wails 脚手架生成基础项目（选定 v2）
-  - [x] 验证前端（React + Tailwind）与 Go 后端能正常联调启动
-  - [x] 确认 Windows 下本地构建可产出可运行 exe
-
-- [ ] **设计并落地 SQLite 数据库 Schema（第一版）**
-  - [ ] 设计 provider 表结构（id、baseUrl、类型、apiKey、名称等）
-  - [ ] 设计 model 表结构（id、provider关联、能力字段、上下文长度、max_tokens等）
-  - [ ] 设计调用日志表结构（用于后续 Token 统计）
-    - 预留输入/输出/缓存 token 字段
-  - [ ] 集成纯 Go SQLite 驱动，编写数据库初始化与迁移逻辑
-
-- [ ] **实现 Provider/Model 管理后端接口**
-  - [ ] 实现 provider 的增删改查接口
-  - [ ] 实现 model 的增删改查接口（关联所属 provider）
-  - [ ] 编写基础单元测试覆盖 CRUD 逻辑
-
-- [ ] **实现 Provider/Model 管理前端界面**
-  - [ ] 实现 provider 列表与新增/编辑表单
-  - [ ] 实现 model 列表与新增/编辑表单
-  - [ ] 完成基础的表单校验与操作反馈提示
-
-- [ ] **设计内部统一协议格式（IR，非流式）**
-  - [ ] 定义内部消息结构（文本、多模态、工具调用、思考内容的表达方式）
-  - [ ] 编写 IR 数据结构对应的 Go struct 与文档说明
-  - [ ] 编写至少 3 个手工示例（覆盖纯文本、工具调用、多模态）验证 IR 表达能力
-
-- [ ] **实现 OpenAI Chat → IR 的入站解析**
-  - [ ] 解析标准 OpenAI Chat 请求体（messages、tools、参数等）映射为 IR
-  - [ ] 处理 system 消息、多轮对话、工具调用请求的映射
-  - [ ] 编写单元测试覆盖典型请求样例
-
-- [ ] **实现 IR → 常用供应商真实请求的出站映射（手写，先支持1~2家）**
-  - [ ] 选定优先支持的供应商（如 OpenAI 官方 + DeepSeek）
-  - [ ] 编写 IR 到该供应商真实请求体的映射逻辑
-  - [ ] 编写单元测试验证映射正确性
-
 - [ ] **打通端到端非流式调用链路**
   - [ ] 实现 HTTP 路由：接收 OpenAI Chat 请求 → IR → 出站请求 → 得到响应
   - [ ] 实现供应商响应 → IR → OpenAI Chat 响应格式的回程转换
@@ -147,4 +104,47 @@
 
 ## 🚧 开发中
 
+- [ ] **设计内部统一协议格式（IR，非流式）**
+  - [ ] 定义内部消息结构（文本、多模态、工具调用、思考内容的表达方式）
+  - [ ] 编写 IR 数据结构对应的 Go struct 与文档说明
+  - [ ] 编写至少 3 个手工示例（覆盖纯文本、工具调用、多模态）验证 IR 表达能力
+
+- [ ] **实现 OpenAI Chat → IR 的入站解析**
+  - [ ] 解析标准 OpenAI Chat 请求体（messages、tools、参数等）映射为 IR
+  - [ ] 处理 system 消息、多轮对话、工具调用请求的映射
+  - [ ] 编写单元测试覆盖典型请求样例
+
+- [ ] **实现 IR → 常用供应商真实请求的出站映射（手写，先支持1~2家）**
+  - [ ] 选定优先支持的供应商（如 OpenAI 官方 + DeepSeek）
+  - [ ] 编写 IR 到该供应商真实请求体的映射逻辑
+  - [ ] 编写单元测试验证映射正确性
+
 ## ✅ 已完成
+
+- [x] **初始化项目目录与本地 Git 仓库**
+  - [x] 初始化 Go module，确定模块名与目录结构（cmd/、internal/、frontend/、docs/ 等）
+  - [x] 初始化本地 Git 仓库并创建 `.gitignore`
+    - 忽略构建产物、node_modules、本地数据库文件、IDE 配置
+  - [x] 提交初始 commit，包含 AGENTS.md、ROADMAP.md 与空目录结构
+
+- [x] **搭建 Wails 项目骨架**
+  - [x] 使用 Wails 脚手架生成基础项目（选定 v2）
+  - [x] 验证前端（React + Tailwind）与 Go 后端能正常联调启动
+  - [x] 确认 Windows 下本地构建可产出可运行 exe
+
+- [x] **设计并落地 SQLite 数据库 Schema（第一版）**
+  - [x] 设计 provider 表结构（id、baseUrl、类型、apiKey、名称等）
+  - [x] 设计 model 表结构（id、provider关联、能力字段、上下文长度、max_tokens等）
+  - [x] 设计调用日志表结构（用于后续 Token 统计）
+    - 预留输入/输出/缓存 token 字段
+  - [x] 集成纯 Go SQLite 驱动，编写数据库初始化与迁移逻辑
+
+- [x] **实现 Provider/Model 管理后端接口**
+  - [x] 实现 provider 的增删改查接口
+  - [x] 实现 model 的增删改查接口（关联所属 provider）
+  - [x] 编写基础单元测试覆盖 CRUD 逻辑
+
+- [x] **实现 Provider/Model 管理前端界面**
+  - [x] 实现 provider 列表与新增/编辑表单
+  - [x] 实现 model 列表与新增/编辑表单
+  - [x] 完成基础的表单校验与操作反馈提示
