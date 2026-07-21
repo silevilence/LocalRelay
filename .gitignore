@@ -2,6 +2,9 @@ build/bin/
 *.exe
 *.test
 coverage.out
+coverage
+cov_*.out
+*.out
 .gocache/
 .codegraph/
 
