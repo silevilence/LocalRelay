@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"localrelay/internal/capabilities"
 	"localrelay/internal/protocol/openaichat"
 	"localrelay/internal/store"
 )
@@ -111,8 +112,15 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	log.ProviderID, log.ModelID = routed.Provider.ID, routed.Model.ID
+	providerCapabilities, err := capabilities.Parse(routed.Provider.CapabilityConfig)
+	if err != nil {
+		status = http.StatusBadRequest
+		log.Error = err.Error()
+		writeError(w, status, "bad_provider_capabilities", err.Error())
+		return
+	}
 
-	irReq, err := clientReq.ToIR()
+	irReq, err := clientReq.ToIRWithCapabilities(providerCapabilities)
 	if err != nil {
 		status = http.StatusBadRequest
 		log.Error = err.Error()
@@ -121,7 +129,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 	irReq.Model = routed.Model.ID
 
-	providerReq, err := openaichat.ToProviderRequest(irReq, openaichat.Provider(routed.Provider.Type))
+	providerReq, err := openaichat.ToProviderRequest(irReq, providerCapabilities)
 	if err != nil {
 		status = http.StatusBadRequest
 		log.Error = err.Error()
@@ -160,7 +168,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	irResp, err := openaichat.ParseResponse(respBody)
+	irResp, err := openaichat.ParseResponseWithCapabilities(respBody, providerCapabilities)
 	if err != nil {
 		status = http.StatusBadGateway
 		log.Error = err.Error()
@@ -173,7 +181,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	log.CacheCreationInputTokens = irResp.Usage.CacheCreationInputTokens
 	log.CacheReadInputTokens = irResp.Usage.CacheReadInputTokens
 
-	clientResp, err := openaichat.FromIRResponse(irResp)
+	clientResp, err := openaichat.FromIRResponseWithCapabilities(irResp, providerCapabilities)
 	if err != nil {
 		status = http.StatusBadGateway
 		log.Error = err.Error()

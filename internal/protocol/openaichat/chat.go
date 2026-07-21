@@ -5,14 +5,8 @@ import (
 	"errors"
 	"fmt"
 
+	"localrelay/internal/capabilities"
 	"localrelay/internal/ir"
-)
-
-type Provider string
-
-const (
-	ProviderOpenAI   Provider = "openai"
-	ProviderDeepSeek Provider = "deepseek"
 )
 
 type Request struct {
@@ -27,13 +21,18 @@ type Request struct {
 	PresencePenalty  *float64        `json:"presence_penalty,omitempty"`
 	FrequencyPenalty *float64        `json:"frequency_penalty,omitempty"`
 	ResponseFormat   json.RawMessage `json:"response_format,omitempty"`
+	ReasoningEffort  *string         `json:"reasoning_effort,omitempty"`
+	Thinking         json.RawMessage `json:"thinking,omitempty"`
+	EnableThinking   *bool           `json:"enable_thinking,omitempty"`
+	ThinkingBudget   *int            `json:"thinking_budget,omitempty"`
 }
 
 type Message struct {
-	Role       string     `json:"role"`
-	Content    any        `json:"content"`
-	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
-	ToolCallID string     `json:"tool_call_id,omitempty"`
+	Role             string     `json:"role"`
+	Content          any        `json:"content"`
+	ReasoningContent string     `json:"reasoning_content,omitempty"`
+	ToolCalls        []ToolCall `json:"tool_calls,omitempty"`
+	ToolCallID       string     `json:"tool_call_id,omitempty"`
 }
 
 type ContentPart struct {
@@ -104,14 +103,22 @@ func Parse(data []byte) (ir.Request, error) {
 }
 
 func ParseResponse(data []byte) (ir.Response, error) {
+	return ParseResponseWithCapabilities(data, capabilities.Provider{Protocol: capabilities.ProtocolOpenAIChat})
+}
+
+func ParseResponseWithCapabilities(data []byte, cfg capabilities.Provider) (ir.Response, error) {
 	var in Response
 	if err := json.Unmarshal(data, &in); err != nil {
 		return ir.Response{}, err
 	}
-	return in.ToIR()
+	return in.ToIRWithCapabilities(cfg)
 }
 
 func (r Request) ToIR() (ir.Request, error) {
+	return r.ToIRWithCapabilities(capabilities.Provider{Protocol: capabilities.ProtocolOpenAIChat})
+}
+
+func (r Request) ToIRWithCapabilities(cfg capabilities.Provider) (ir.Request, error) {
 	out := ir.Request{
 		Model: r.Model,
 		Params: ir.Params{
@@ -121,6 +128,10 @@ func (r Request) ToIR() (ir.Request, error) {
 			PresencePenalty:  r.PresencePenalty,
 			FrequencyPenalty: r.FrequencyPenalty,
 			ResponseFormat:   r.ResponseFormat,
+			ReasoningEffort:  r.ReasoningEffort,
+			Thinking:         r.Thinking,
+			EnableThinking:   r.EnableThinking,
+			ThinkingBudget:   r.ThinkingBudget,
 		},
 	}
 	out.Params.Stop = stopStrings(r.Stop)
@@ -138,7 +149,7 @@ func (r Request) ToIR() (ir.Request, error) {
 	}
 
 	for _, msg := range r.Messages {
-		converted, err := msg.toIR()
+		converted, err := msg.toIRWithCapabilities(cfg)
 		if err != nil {
 			return ir.Request{}, err
 		}
@@ -148,6 +159,10 @@ func (r Request) ToIR() (ir.Request, error) {
 }
 
 func (r Response) ToIR() (ir.Response, error) {
+	return r.ToIRWithCapabilities(capabilities.Provider{Protocol: capabilities.ProtocolOpenAIChat})
+}
+
+func (r Response) ToIRWithCapabilities(cfg capabilities.Provider) (ir.Response, error) {
 	out := ir.Response{ID: r.ID, Model: r.Model}
 	if r.Usage != nil {
 		out.Usage = ir.Usage{
@@ -159,7 +174,7 @@ func (r Response) ToIR() (ir.Response, error) {
 		}
 	}
 	for _, choice := range r.Choices {
-		msg, err := choice.Message.toIR()
+		msg, err := choice.Message.toIRWithCapabilities(cfg)
 		if err != nil {
 			return ir.Response{}, err
 		}
@@ -173,6 +188,10 @@ func (r Response) ToIR() (ir.Response, error) {
 }
 
 func FromIRResponse(resp ir.Response) (Response, error) {
+	return FromIRResponseWithCapabilities(resp, capabilities.Provider{Protocol: capabilities.ProtocolOpenAIChat})
+}
+
+func FromIRResponseWithCapabilities(resp ir.Response, cfg capabilities.Provider) (Response, error) {
 	out := Response{
 		ID:      resp.ID,
 		Object:  "chat.completion",
@@ -190,7 +209,7 @@ func FromIRResponse(resp ir.Response) (Response, error) {
 		}
 	}
 	for _, choice := range resp.Choices {
-		msg, err := messageFromIR(choice.Message)
+		msg, err := messageFromIRForField(choice.Message, cfg, cfg.Thinking.ResponseContentField)
 		if err != nil {
 			return Response{}, err
 		}
@@ -204,6 +223,10 @@ func FromIRResponse(resp ir.Response) (Response, error) {
 }
 
 func (m Message) toIR() (ir.Message, error) {
+	return m.toIRWithCapabilities(capabilities.Provider{Protocol: capabilities.ProtocolOpenAIChat})
+}
+
+func (m Message) toIRWithCapabilities(cfg capabilities.Provider) (ir.Message, error) {
 	if err := validateRole(m.Role); err != nil {
 		return ir.Message{}, err
 	}
@@ -222,6 +245,9 @@ func (m Message) toIR() (ir.Message, error) {
 		return ir.Message{}, err
 	}
 	out.Content = append(out.Content, blocks...)
+	if cfg.Thinking.ResponseContentField == capabilities.ThinkingFieldReasoningContent && m.ReasoningContent != "" {
+		out.Content = append(out.Content, ir.Thinking(m.ReasoningContent, ""))
+	}
 	for _, call := range m.ToolCalls {
 		if call.Type != "" && call.Type != "function" {
 			return ir.Message{}, fmt.Errorf("unsupported tool call type %q", call.Type)
@@ -235,11 +261,9 @@ func (m Message) toIR() (ir.Message, error) {
 	return out, nil
 }
 
-func ToProviderRequest(req ir.Request, provider Provider) (Request, error) {
-	switch provider {
-	case ProviderOpenAI, ProviderDeepSeek:
-	default:
-		return Request{}, fmt.Errorf("unsupported provider %q", provider)
+func ToProviderRequest(req ir.Request, cfg capabilities.Provider) (Request, error) {
+	if cfg.Protocol != capabilities.ProtocolOpenAIChat {
+		return Request{}, fmt.Errorf("unsupported provider protocol %q", cfg.Protocol)
 	}
 
 	out := Request{
@@ -250,6 +274,9 @@ func ToProviderRequest(req ir.Request, provider Provider) (Request, error) {
 		PresencePenalty:  req.Params.PresencePenalty,
 		FrequencyPenalty: req.Params.FrequencyPenalty,
 		ResponseFormat:   req.Params.ResponseFormat,
+	}
+	if err := applyConfiguredFields(&out, req, cfg); err != nil {
+		return Request{}, err
 	}
 	stops := stopStrings(req.Params.Stop)
 	if len(stops) == 1 {
@@ -273,7 +300,7 @@ func ToProviderRequest(req ir.Request, provider Provider) (Request, error) {
 	}
 
 	for _, msg := range req.Messages {
-		converted, err := messageFromIR(msg)
+		converted, err := messageFromIRForField(msg, cfg, cfg.Thinking.RequestMessageField)
 		if err != nil {
 			return Request{}, err
 		}
@@ -282,7 +309,40 @@ func ToProviderRequest(req ir.Request, provider Provider) (Request, error) {
 	return out, nil
 }
 
+func applyConfiguredFields(out *Request, req ir.Request, cfg capabilities.Provider) error {
+	if req.Params.ReasoningEffort != nil {
+		if !cfg.SupportsReasoningEffort(*req.Params.ReasoningEffort) {
+			return cfg.UnsupportedFieldError("reasoning_effort")
+		}
+		mapped := cfg.MapReasoningEffort(*req.Params.ReasoningEffort)
+		out.ReasoningEffort = &mapped
+	}
+	if len(req.Params.Thinking) > 0 {
+		if !cfg.SupportsRequestField("thinking") {
+			return cfg.UnsupportedFieldError("thinking")
+		}
+		out.Thinking = req.Params.Thinking
+	}
+	if req.Params.EnableThinking != nil {
+		if !cfg.SupportsRequestField("enable_thinking") {
+			return cfg.UnsupportedFieldError("enable_thinking")
+		}
+		out.EnableThinking = req.Params.EnableThinking
+	}
+	if req.Params.ThinkingBudget != nil {
+		if !cfg.SupportsRequestField("thinking_budget") {
+			return cfg.UnsupportedFieldError("thinking_budget")
+		}
+		out.ThinkingBudget = req.Params.ThinkingBudget
+	}
+	return nil
+}
+
 func messageFromIR(msg ir.Message) (Message, error) {
+	return messageFromIRForField(msg, capabilities.Provider{Protocol: capabilities.ProtocolOpenAIChat}, "")
+}
+
+func messageFromIRForField(msg ir.Message, cfg capabilities.Provider, thinkingField string) (Message, error) {
 	if err := validateRole(string(msg.Role)); err != nil {
 		return Message{}, err
 	}
@@ -322,8 +382,9 @@ func messageFromIR(msg ir.Message) (Message, error) {
 			out.ToolCallID = block.ToolCallID
 			text += block.Result
 		case ir.BlockThinking:
-			// OpenAI Chat/DeepSeek compatible requests have no portable field
-			// for pre-existing thinking blocks, so this is intentionally dropped.
+			if msg.Role == ir.RoleAssistant && thinkingField == capabilities.ThinkingFieldReasoningContent {
+				out.ReasoningContent += block.Text
+			}
 		default:
 			return Message{}, fmt.Errorf("unsupported IR block type %q", block.Type)
 		}
@@ -341,6 +402,8 @@ func messageFromIR(msg ir.Message) (Message, error) {
 		// null/string content. Any image parts in the IR are dropped here.
 		if text != "" {
 			out.Content = text
+		} else if cfg.ToolCalls.RequireAssistantContent {
+			out.Content = ""
 		}
 		return out, nil
 	}

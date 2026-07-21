@@ -58,6 +58,7 @@ export namespace store {
 	    type: string;
 	    baseUrl: string;
 	    apiKey?: string;
+	    capabilityConfig: string;
 	    createdAt: string;
 	    updatedAt: string;
 	
@@ -72,6 +73,7 @@ export namespace store {
 	        this.type = source["type"];
 	        this.baseUrl = source["baseUrl"];
 	        this.apiKey = source["apiKey"];
+	        this.capabilityConfig = source["capabilityConfig"];
 	        this.createdAt = source["createdAt"];
 	        this.updatedAt = source["updatedAt"];
 	    }
@@ -82,6 +84,7 @@ export namespace store {
 	    type: string;
 	    baseUrl: string;
 	    apiKey: string;
+	    capabilityConfig: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new ProviderInput(source);
@@ -94,7 +97,48 @@ export namespace store {
 	        this.type = source["type"];
 	        this.baseUrl = source["baseUrl"];
 	        this.apiKey = source["apiKey"];
+	        this.capabilityConfig = source["capabilityConfig"];
 	    }
+	}
+	export class ProviderPreset {
+	    id: string;
+	    name: string;
+	    type: string;
+	    baseUrl: string;
+	    capabilityConfig: string;
+	    models: ModelInput[];
+	
+	    static createFrom(source: any = {}) {
+	        return new ProviderPreset(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.name = source["name"];
+	        this.type = source["type"];
+	        this.baseUrl = source["baseUrl"];
+	        this.capabilityConfig = source["capabilityConfig"];
+	        this.models = this.convertValues(source["models"], ModelInput);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
 	}
 	export class TokenStatPoint {
 	    date: string;

@@ -5,6 +5,7 @@ import {
     DeleteModel,
     DeleteProvider,
     ListModels,
+    ListProviderPresets,
     ListProviders,
     RelayBaseURL,
     TokenStats,
@@ -12,13 +13,15 @@ import {
     UpdateProvider,
 } from "../wailsjs/go/main/App";
 
-const emptyProvider = {id: "", name: "", type: "openai", baseUrl: "", apiKey: ""};
+const emptyProvider = {id: "", name: "", type: "openai", baseUrl: "", apiKey: "", capabilityConfig: ""};
 const emptyModel = {id: "", providerId: "", name: "", capabilities: "", contextLength: 0, maxTokens: 0, enabled: true};
 
 function App() {
     const [providers, setProviders] = useState([]);
+    const [providerPresets, setProviderPresets] = useState([]);
     const [models, setModels] = useState([]);
     const [selectedProviderId, setSelectedProviderId] = useState("");
+    const [selectedPresetId, setSelectedPresetId] = useState("");
     const [providerDraft, setProviderDraft] = useState(emptyProvider);
     const [modelDraft, setModelDraft] = useState(emptyModel);
     const [search, setSearch] = useState("");
@@ -54,6 +57,7 @@ function App() {
 
     useEffect(() => {
         refreshProviders();
+        ListProviderPresets().then((items) => setProviderPresets(items || [])).catch(() => {});
         RelayBaseURL().then(setRelayBaseUrl).catch(() => {});
     }, []);
 
@@ -65,6 +69,7 @@ function App() {
         if (selectedProvider) {
             setProviderDraft(providerToDraft(selectedProvider));
             setIsAddingProvider(false);
+            setSelectedPresetId("");
         }
         refreshModels(selectedProviderId);
         setShowModelForm(false);
@@ -97,12 +102,22 @@ function App() {
             setMessage("平台 ID、名称、类型和 API 地址必填。");
             return;
         }
+        const preset = providerPresets.find((item) => item.id === selectedPresetId);
+        const payload = {...providerDraft, capabilityConfig: providerDraft.capabilityConfig || preset?.capabilityConfig || ""};
         try {
-            isAddingProvider ? await CreateProvider(providerDraft) : await UpdateProvider(providerDraft);
+            if (isAddingProvider) {
+                await CreateProvider(payload);
+                for (const model of preset?.models || []) {
+                    await CreateModel({...model, providerId: payload.id, enabled: model.enabled !== false});
+                }
+            } else {
+                await UpdateProvider(payload);
+            }
             await refreshProviders();
-            setSelectedProviderId(providerDraft.id);
+            setSelectedProviderId(payload.id);
             setIsAddingProvider(false);
-            setMessage(isAddingProvider ? "平台已添加。" : "平台配置已保存。");
+            setSelectedPresetId("");
+            setMessage(isAddingProvider ? `平台已添加${preset?.models?.length ? `，并导入 ${preset.models.length} 个预设模型。` : "。"}` : "平台配置已保存。");
         } catch (error) {
             setMessage(`保存平台失败：${error}`);
         }
@@ -158,9 +173,26 @@ function App() {
 
     function startAddProvider() {
         setProviderDraft(emptyProvider);
+        setSelectedPresetId("");
         setIsAddingProvider(true);
         setSelectedProviderId("");
         setModels([]);
+    }
+
+    function applyProviderPreset(preset) {
+        setProviderDraft({
+            id: preset.id,
+            name: preset.name,
+            type: preset.type,
+            baseUrl: preset.baseUrl,
+            apiKey: providerDraft.apiKey || "",
+            capabilityConfig: preset.capabilityConfig || "",
+        });
+        setSelectedPresetId(preset.id);
+        setIsAddingProvider(true);
+        setSelectedProviderId("");
+        setModels([]);
+        setMessage(`已套用「${preset.name}」预设，填入 API Key 后保存。`);
     }
 
     function startAddModel() {
@@ -259,9 +291,12 @@ function App() {
                             <ProviderPanel
                                 draft={providerDraft}
                                 isAdding={isAddingProvider}
+                                presets={providerPresets}
+                                selectedPresetId={selectedPresetId}
                                 showKey={showKey}
                                 onToggleKey={() => setShowKey((value) => !value)}
                                 onChange={(patch) => setProviderDraft({...providerDraft, ...patch})}
+                                onApplyPreset={applyProviderPreset}
                                 onSubmit={saveProvider}
                                 onDelete={activeProvider ? () => removeProvider(activeProvider) : null}
                                 onTest={() => setMessage("检测接口尚未实现；当前仅保存本地配置。")}
@@ -338,9 +373,36 @@ function App() {
     );
 }
 
-function ProviderPanel({draft, isAdding, showKey, onToggleKey, onChange, onSubmit, onDelete, onTest}) {
+function ProviderPanel({draft, isAdding, presets, selectedPresetId, showKey, onToggleKey, onChange, onApplyPreset, onSubmit, onDelete, onTest}) {
     return (
         <form className="space-y-7" onSubmit={onSubmit}>
+            {isAdding && presets.length > 0 && (
+                <div>
+                    <div className="mb-3 flex items-center justify-between">
+                        <h2 className="text-xl font-bold">从预设添加</h2>
+                        <span className="text-sm text-zinc-500">会自动导入常用模型</span>
+                    </div>
+                    <div className="grid gap-3 md:grid-cols-4">
+                        {presets.map((preset) => (
+                            <button
+                                key={preset.id}
+                                className={`rounded-2xl border px-4 py-3 text-left transition ${
+                                    selectedPresetId === preset.id
+                                        ? "border-emerald-500 bg-emerald-950/30"
+                                        : "border-zinc-800 bg-zinc-950/40 hover:bg-zinc-900"
+                                }`}
+                                type="button"
+                                onClick={() => onApplyPreset(preset)}
+                            >
+                                <div className="font-bold text-zinc-100">{preset.name}</div>
+                                <div className="mt-1 truncate text-xs text-zinc-500">{preset.baseUrl}</div>
+                                <div className="mt-2 text-xs text-zinc-400">{preset.models?.length || 0} 个模型</div>
+                            </button>
+                        ))}
+                    </div>
+                </div>
+            )}
+
             {isAdding && (
                 <div className="grid gap-4 md:grid-cols-3">
                     <Field label="平台 ID" value={draft.id} onChange={(id) => onChange({id})} placeholder="right-code-gemini" />
@@ -381,6 +443,16 @@ function ProviderPanel({draft, isAdding, showKey, onToggleKey, onChange, onSubmi
                 />
                 <p className="mt-2 text-sm text-zinc-500">预览：{previewChatUrl(draft.baseUrl)}</p>
             </div>
+
+            <label className="grid gap-1 text-sm font-semibold text-zinc-300">
+                差异兼容配置 JSON
+                <textarea
+                    className="min-h-32 rounded-xl border border-zinc-700 bg-[#151515] px-3 py-2.5 font-mono text-xs text-zinc-100 outline-none placeholder:text-zinc-600"
+                    value={draft.capabilityConfig}
+                    onChange={(event) => onChange({capabilityConfig: event.target.value})}
+                    placeholder='{"protocol":"openai_chat"}'
+                />
+            </label>
 
             <div className="flex gap-3">
                 <button className="rounded-xl bg-zinc-100 px-5 py-2.5 font-bold text-zinc-950 hover:bg-white" type="submit">
@@ -608,6 +680,7 @@ function providerToDraft(provider) {
         type: provider.type,
         baseUrl: provider.baseUrl,
         apiKey: provider.apiKey || "",
+        capabilityConfig: provider.capabilityConfig || "",
     };
 }
 

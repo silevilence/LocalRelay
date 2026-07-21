@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	_ "modernc.org/sqlite"
@@ -26,6 +27,9 @@ func TestProviderCRUDEncryptsAPIKey(t *testing.T) {
 	}
 	if provider.ID != "openai" {
 		t.Fatalf("provider id = %q", provider.ID)
+	}
+	if provider.CapabilityConfig == "" {
+		t.Fatal("default capability config was not set")
 	}
 
 	var raw string
@@ -70,6 +74,29 @@ func TestProviderCRUDEncryptsAPIKey(t *testing.T) {
 	}
 	if len(providers) != 0 {
 		t.Fatalf("providers after delete = %#v", providers)
+	}
+}
+
+func TestProviderCapabilityConfigIsStoredAndValidated(t *testing.T) {
+	s := openTestStore(t)
+	defer s.Close()
+
+	custom := `{"protocol":"openai_chat","thinking":{"requestFields":["enable_thinking"],"responseContentField":"reasoning_content"}}`
+	if _, err := s.CreateProvider(ProviderInput{ID: "sf", Name: "SiliconFlow", Type: "siliconflow", BaseURL: "https://api.siliconflow.com/v1", CapabilityConfig: custom}); err != nil {
+		t.Fatal(err)
+	}
+	providers, err := s.ListProviders()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if providers[0].CapabilityConfig != custom {
+		t.Fatalf("capability config = %q", providers[0].CapabilityConfig)
+	}
+	if _, err := s.CreateProvider(ProviderInput{ID: "bad", Name: "Bad", Type: "openai", BaseURL: "https://example.test", CapabilityConfig: `{`}); err == nil {
+		t.Fatal("expected invalid capability config error")
+	}
+	if _, err := s.CreateProvider(ProviderInput{ID: "bad2", Name: "Bad2", Type: "openai", BaseURL: "https://example.test", CapabilityConfig: `{"thinking":{}}`}); err == nil {
+		t.Fatal("expected missing protocol error")
 	}
 }
 
@@ -166,6 +193,9 @@ func TestRoutingHonorsEnabledModels(t *testing.T) {
 	}
 	if _, err := s.GetRoutedModel("off"); err == nil {
 		t.Fatal("expected provider/model validation error")
+	}
+	if routed.Provider.CapabilityConfig == "" {
+		t.Fatal("routed provider should include capability config")
 	}
 }
 
@@ -488,6 +518,84 @@ CREATE TABLE models (
 	}
 	if !found {
 		t.Fatal("enabled column was not added")
+	}
+
+	var capabilityConfig string
+	if err := s.db.QueryRow(`SELECT capability_config FROM providers WHERE id = 'p'`).Scan(&capabilityConfig); err != nil && err != sql.ErrNoRows {
+		t.Fatal(err)
+	}
+}
+
+func TestMigrationAddsProviderCapabilityConfigColumn(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "localrelay.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`
+CREATE TABLE providers (
+	id TEXT PRIMARY KEY,
+	name TEXT NOT NULL,
+	type TEXT NOT NULL,
+	base_url TEXT NOT NULL,
+	api_key_encrypted TEXT NOT NULL DEFAULT '',
+	created_at TEXT NOT NULL,
+	updated_at TEXT NOT NULL
+);
+INSERT INTO providers(id, name, type, base_url, created_at, updated_at)
+VALUES ('deepseek', 'DeepSeek', 'deepseek', 'https://api.deepseek.com', 'now', 'now');`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	var capabilityConfig string
+	if err := s.db.QueryRow(`SELECT capability_config FROM providers WHERE id = 'deepseek'`).Scan(&capabilityConfig); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(capabilityConfig, "reasoning_content") {
+		t.Fatalf("backfilled capability config = %q", capabilityConfig)
+	}
+}
+
+func TestBuiltinProviderPresets(t *testing.T) {
+	presets := BuiltinProviderPresets()
+	if len(presets) < 4 {
+		t.Fatalf("presets = %#v", presets)
+	}
+	for _, preset := range presets {
+		if preset.ID == "" || preset.Name == "" || preset.Type == "" || preset.BaseURL == "" || preset.CapabilityConfig == "" {
+			t.Fatalf("bad preset = %#v", preset)
+		}
+		if err := validateProvider(ProviderInput{ID: preset.ID, Name: preset.Name, Type: preset.Type, BaseURL: preset.BaseURL, CapabilityConfig: preset.CapabilityConfig}); err != nil {
+			t.Fatalf("preset %s invalid: %v", preset.ID, err)
+		}
+	}
+}
+
+func TestMigrationHelperErrors(t *testing.T) {
+	s := openTestStore(t)
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.migrate(); err == nil {
+		t.Fatal("expected migrate error")
+	}
+	if err := s.ensureProviderCapabilityConfigColumn(); err == nil {
+		t.Fatal("expected provider capability column error")
+	}
+	if err := s.ensureModelEnabledColumn(); err == nil {
+		t.Fatal("expected model enabled column error")
+	}
+	if err := s.backfillProviderCapabilityConfig(); err == nil {
+		t.Fatal("expected backfill error")
 	}
 }
 

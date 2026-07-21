@@ -26,6 +26,10 @@ export function ListModels(arg1) {
   return window['go']['main']['App']['ListModels'](arg1);
 }
 
+export function ListProviderPresets() {
+  return window['go']['main']['App']['ListProviderPresets']();
+}
+
 export function ListProviders() {
   return window['go']['main']['App']['ListProviders']();
 }

@@ -66,6 +66,10 @@ func (a *App) ListProviders() ([]store.Provider, error) {
 	return a.store.ListProviders()
 }
 
+func (a *App) ListProviderPresets() []store.ProviderPreset {
+	return store.BuiltinProviderPresets()
+}
+
 func (a *App) CreateProvider(input store.ProviderInput) (store.Provider, error) {
 	return a.store.CreateProvider(input)
 }

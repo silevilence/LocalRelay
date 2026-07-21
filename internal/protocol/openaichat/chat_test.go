@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"localrelay/internal/capabilities"
 	"localrelay/internal/ir"
 )
 
@@ -98,7 +99,7 @@ func TestIRToOpenAICompatibleProviderRequest(t *testing.T) {
 		},
 	}
 
-	out, err := ToProviderRequest(req, ProviderDeepSeek)
+	out, err := ToProviderRequest(req, mustCapabilities(t, capabilities.DefaultJSON("deepseek")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,12 +122,112 @@ func TestIRToOpenAICompatibleProviderRequest(t *testing.T) {
 		t.Fatalf("tool message = %#v", out.Messages[3])
 	}
 
+	if out.Messages[2].ReasoningContent != "Need a tool." || out.Messages[2].Content != "" {
+		t.Fatalf("deepseek assistant tool message = %#v", out.Messages[2])
+	}
+}
+
+func TestConfiguredProviderFields(t *testing.T) {
+	effort := "xhigh"
+	thinking := json.RawMessage(`{"type":"enabled"}`)
+	enableThinking := false
+	budget := 4096
+
+	deepseek, err := ToProviderRequest(ir.Request{Params: ir.Params{
+		ReasoningEffort: &effort,
+		Thinking:        thinking,
+	}}, mustCapabilities(t, capabilities.DefaultJSON("deepseek")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deepseek.ReasoningEffort == nil || *deepseek.ReasoningEffort != "max" || string(deepseek.Thinking) != string(thinking) {
+		t.Fatalf("deepseek configured fields = %#v", deepseek)
+	}
+
+	siliconflow, err := ToProviderRequest(ir.Request{Params: ir.Params{
+		EnableThinking: &enableThinking,
+		ThinkingBudget: &budget,
+	}}, mustCapabilities(t, capabilities.DefaultJSON("siliconflow")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if siliconflow.EnableThinking == nil || *siliconflow.EnableThinking || siliconflow.ThinkingBudget == nil || *siliconflow.ThinkingBudget != 4096 {
+		t.Fatalf("siliconflow configured fields = %#v", siliconflow)
+	}
+
+	if _, err := ToProviderRequest(ir.Request{Params: ir.Params{Thinking: thinking}}, mustCapabilities(t, capabilities.DefaultJSON("openai"))); err == nil {
+		t.Fatal("expected unsupported thinking field error")
+	}
+	if _, err := ToProviderRequest(ir.Request{Params: ir.Params{ThinkingBudget: &budget}}, mustCapabilities(t, capabilities.DefaultJSON("openai"))); err == nil {
+		t.Fatal("expected unsupported thinking_budget field error")
+	}
+}
+
+func TestConfiguredReasoningContentResponse(t *testing.T) {
+	resp, err := ParseResponseWithCapabilities([]byte(`{
+		"model":"deepseek-v4-pro",
+		"choices":[{"index":0,"message":{"role":"assistant","content":"done","reasoning_content":"think"}}]
+	}`), mustCapabilities(t, capabilities.DefaultJSON("deepseek")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocks := resp.Choices[0].Message.Content
+	if len(blocks) != 2 || blocks[1].Type != ir.BlockThinking || blocks[1].Text != "think" {
+		t.Fatalf("response blocks = %#v", blocks)
+	}
+	out, err := FromIRResponseWithCapabilities(resp, mustCapabilities(t, capabilities.DefaultJSON("deepseek")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Choices[0].Message.ReasoningContent != "think" {
+		t.Fatalf("client response = %#v", out.Choices[0].Message)
+	}
+}
+
+func TestConfiguredReasoningContentHistory(t *testing.T) {
+	cfg := mustCapabilities(t, capabilities.DefaultJSON("deepseek"))
+	req, err := Request{Messages: []Message{{
+		Role:             "assistant",
+		Content:          "using a tool",
+		ReasoningContent: "need tool",
+		ToolCalls: []ToolCall{{
+			ID:       "call_1",
+			Type:     "function",
+			Function: FunctionCall{Name: "lookup", Arguments: `{}`},
+		}},
+	}}}.ToIRWithCapabilities(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(req.Messages[0].Content) != 3 || req.Messages[0].Content[1].Type != ir.BlockThinking {
+		t.Fatalf("ir history = %#v", req.Messages[0].Content)
+	}
+	out, err := ToProviderRequest(req, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Messages[0].ReasoningContent != "need tool" || out.Messages[0].Content != "using a tool" {
+		t.Fatalf("provider history = %#v", out.Messages[0])
+	}
+}
+
+func TestOpenAIConfigDropsThinkingHistory(t *testing.T) {
+	out, err := ToProviderRequest(ir.Request{Messages: []ir.Message{{
+		Role: ir.RoleAssistant,
+		Content: []ir.ContentBlock{
+			ir.Thinking("private", ""),
+			ir.Text("answer"),
+		},
+	}}}, mustCapabilities(t, capabilities.DefaultJSON("openai")))
+	if err != nil {
+		t.Fatal(err)
+	}
 	data, err := json.Marshal(out)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(data), "Need a tool.") {
-		t.Fatalf("thinking block leaked to provider request: %s", data)
+	if strings.Contains(string(data), "private") {
+		t.Fatalf("thinking leaked into generic OpenAI request: %s", data)
 	}
 }
 
@@ -157,6 +258,38 @@ func TestProviderResponseRoundTripsThroughIR(t *testing.T) {
 	}
 }
 
+func TestCompatibilityWrappers(t *testing.T) {
+	resp, err := (Response{
+		Model: "m",
+		Choices: []ResponseChoice{{
+			Index:   0,
+			Message: Message{Role: "assistant", Content: "ok"},
+		}},
+	}).ToIR()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Choices[0].Message.Content[0].Text != "ok" {
+		t.Fatalf("response wrapper = %#v", resp)
+	}
+
+	msg, err := (Message{Role: "user", Content: "hello"}).toIR()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if msg.Content[0].Text != "hello" {
+		t.Fatalf("message wrapper = %#v", msg)
+	}
+
+	out, err := messageFromIR(ir.Message{Role: ir.RoleAssistant, Content: []ir.ContentBlock{ir.Text("hi")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Content != "hi" {
+		t.Fatalf("from ir wrapper = %#v", out)
+	}
+}
+
 func TestParseRejectsBadInputs(t *testing.T) {
 	tests := []struct {
 		name string
@@ -179,6 +312,12 @@ func TestParseRejectsBadInputs(t *testing.T) {
 				t.Fatal("expected error")
 			}
 		})
+	}
+}
+
+func TestParseResponseRejectsBadJSON(t *testing.T) {
+	if _, err := ParseResponseWithCapabilities([]byte(`{`), mustCapabilities(t, capabilities.DefaultJSON("openai"))); err == nil {
+		t.Fatal("expected bad response json error")
 	}
 }
 
@@ -230,16 +369,16 @@ func TestToProviderRejectsBadIR(t *testing.T) {
 	tests := []struct {
 		name string
 		req  ir.Request
-		prov Provider
+		prov capabilities.Provider
 	}{
-		{name: "bad provider", prov: Provider("x")},
-		{name: "bad tool type", prov: ProviderOpenAI, req: ir.Request{Tools: []ir.Tool{{Type: "web_search"}}}},
-		{name: "bad role", prov: ProviderOpenAI, req: ir.Request{Messages: []ir.Message{{Role: ir.Role("developer")}}}},
-		{name: "bad block type", prov: ProviderOpenAI, req: ir.Request{Messages: []ir.Message{{Role: ir.RoleUser, Content: []ir.ContentBlock{{Type: ir.BlockType("audio")}}}}}},
-		{name: "bad arguments", prov: ProviderOpenAI, req: ir.Request{Messages: []ir.Message{{Role: ir.RoleAssistant, Content: []ir.ContentBlock{ir.ToolCall("call_1", "x", json.RawMessage(`nope`))}}}}},
-		{name: "tool result on assistant", prov: ProviderOpenAI, req: ir.Request{Messages: []ir.Message{{Role: ir.RoleAssistant, Content: []ir.ContentBlock{ir.ToolResult("call_1", "x")}}}}},
-		{name: "tool without result", prov: ProviderOpenAI, req: ir.Request{Messages: []ir.Message{{Role: ir.RoleTool, Content: []ir.ContentBlock{ir.Text("x")}}}}},
-		{name: "two tool results", prov: ProviderOpenAI, req: ir.Request{Messages: []ir.Message{{Role: ir.RoleTool, Content: []ir.ContentBlock{ir.ToolResult("a", "1"), ir.ToolResult("b", "2")}}}}},
+		{name: "bad provider", prov: capabilities.Provider{Protocol: "x"}},
+		{name: "bad tool type", prov: mustCapabilities(t, capabilities.DefaultJSON("openai")), req: ir.Request{Tools: []ir.Tool{{Type: "web_search"}}}},
+		{name: "bad role", prov: mustCapabilities(t, capabilities.DefaultJSON("openai")), req: ir.Request{Messages: []ir.Message{{Role: ir.Role("developer")}}}},
+		{name: "bad block type", prov: mustCapabilities(t, capabilities.DefaultJSON("openai")), req: ir.Request{Messages: []ir.Message{{Role: ir.RoleUser, Content: []ir.ContentBlock{{Type: ir.BlockType("audio")}}}}}},
+		{name: "bad arguments", prov: mustCapabilities(t, capabilities.DefaultJSON("openai")), req: ir.Request{Messages: []ir.Message{{Role: ir.RoleAssistant, Content: []ir.ContentBlock{ir.ToolCall("call_1", "x", json.RawMessage(`nope`))}}}}},
+		{name: "tool result on assistant", prov: mustCapabilities(t, capabilities.DefaultJSON("openai")), req: ir.Request{Messages: []ir.Message{{Role: ir.RoleAssistant, Content: []ir.ContentBlock{ir.ToolResult("call_1", "x")}}}}},
+		{name: "tool without result", prov: mustCapabilities(t, capabilities.DefaultJSON("openai")), req: ir.Request{Messages: []ir.Message{{Role: ir.RoleTool, Content: []ir.ContentBlock{ir.Text("x")}}}}},
+		{name: "two tool results", prov: mustCapabilities(t, capabilities.DefaultJSON("openai")), req: ir.Request{Messages: []ir.Message{{Role: ir.RoleTool, Content: []ir.ContentBlock{ir.ToolResult("a", "1"), ir.ToolResult("b", "2")}}}}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -258,7 +397,7 @@ func TestAssistantImageWithToolCallDropsImageForProvider(t *testing.T) {
 			ir.Image("https://example.test/a.png", "low"),
 			ir.ToolCall("call_1", "x", nil),
 		},
-	}}}, ProviderOpenAI)
+	}}}, mustCapabilities(t, capabilities.DefaultJSON("openai")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -275,4 +414,13 @@ func TestAssistantImageWithToolCallDropsImageForProvider(t *testing.T) {
 	if out.Messages[0].ToolCalls[0].Function.Arguments != "{}" {
 		t.Fatalf("default arguments = %#v", out.Messages[0].ToolCalls[0].Function.Arguments)
 	}
+}
+
+func mustCapabilities(t *testing.T, raw string) capabilities.Provider {
+	t.Helper()
+	cfg, err := capabilities.Parse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cfg
 }

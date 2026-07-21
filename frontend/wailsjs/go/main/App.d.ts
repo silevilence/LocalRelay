@@ -14,6 +14,8 @@ export function Greet(arg1:string):Promise<string>;
 
 export function ListModels(arg1:string):Promise<Array<store.Model>>;
 
+export function ListProviderPresets():Promise<Array<store.ProviderPreset>>;
+
 export function ListProviders():Promise<Array<store.Provider>>;
 
 export function RelayBaseURL():Promise<string>;

@@ -15,6 +15,8 @@ import (
 	"strings"
 	"time"
 
+	"localrelay/internal/capabilities"
+
 	_ "modernc.org/sqlite"
 )
 
@@ -29,21 +31,26 @@ type Store struct {
 }
 
 type Provider struct {
-	ID        string `json:"id"`
-	Name      string `json:"name"`
-	Type      string `json:"type"`
-	BaseURL   string `json:"baseUrl"`
-	APIKey    string `json:"apiKey,omitempty"`
-	CreatedAt string `json:"createdAt"`
-	UpdatedAt string `json:"updatedAt"`
-}
-
-type ProviderInput struct {
 	ID      string `json:"id"`
 	Name    string `json:"name"`
 	Type    string `json:"type"`
 	BaseURL string `json:"baseUrl"`
-	APIKey  string `json:"apiKey"`
+	APIKey  string `json:"apiKey,omitempty"`
+	// CapabilityConfig records provider-specific protocol wrinkles such as
+	// reasoning_effort and thinking fields. Unknown provider quirks should live
+	// here instead of being scattered through relay conversion branches.
+	CapabilityConfig string `json:"capabilityConfig"`
+	CreatedAt        string `json:"createdAt"`
+	UpdatedAt        string `json:"updatedAt"`
+}
+
+type ProviderInput struct {
+	ID               string `json:"id"`
+	Name             string `json:"name"`
+	Type             string `json:"type"`
+	BaseURL          string `json:"baseUrl"`
+	APIKey           string `json:"apiKey"`
+	CapabilityConfig string `json:"capabilityConfig"`
 }
 
 type Model struct {
@@ -149,6 +156,7 @@ CREATE TABLE IF NOT EXISTS providers (
 	type TEXT NOT NULL,
 	base_url TEXT NOT NULL,
 	api_key_encrypted TEXT NOT NULL DEFAULT '',
+	capability_config TEXT NOT NULL DEFAULT '',
 	created_at TEXT NOT NULL,
 	updated_at TEXT NOT NULL
 );
@@ -193,11 +201,14 @@ INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (1, CURRENT_
 	if err != nil {
 		return err
 	}
+	if err := s.ensureProviderCapabilityConfigColumn(); err != nil {
+		return err
+	}
 	return s.ensureModelEnabledColumn()
 }
 
 func (s *Store) ListProviders() ([]Provider, error) {
-	rows, err := s.db.Query(`SELECT id, name, type, base_url, api_key_encrypted, created_at, updated_at FROM providers ORDER BY name`)
+	rows, err := s.db.Query(`SELECT id, name, type, base_url, api_key_encrypted, capability_config, created_at, updated_at FROM providers ORDER BY name`)
 	if err != nil {
 		return nil, err
 	}
@@ -207,7 +218,7 @@ func (s *Store) ListProviders() ([]Provider, error) {
 	for rows.Next() {
 		var p Provider
 		var encrypted string
-		if err := rows.Scan(&p.ID, &p.Name, &p.Type, &p.BaseURL, &encrypted, &p.CreatedAt, &p.UpdatedAt); err != nil {
+		if err := rows.Scan(&p.ID, &p.Name, &p.Type, &p.BaseURL, &encrypted, &p.CapabilityConfig, &p.CreatedAt, &p.UpdatedAt); err != nil {
 			return nil, err
 		}
 		p.APIKey, err = s.decrypt(encrypted)
@@ -220,6 +231,7 @@ func (s *Store) ListProviders() ([]Provider, error) {
 }
 
 func (s *Store) CreateProvider(in ProviderInput) (Provider, error) {
+	in = withDefaultCapabilityConfig(in)
 	if err := validateProvider(in); err != nil {
 		return Provider{}, err
 	}
@@ -229,16 +241,17 @@ func (s *Store) CreateProvider(in ProviderInput) (Provider, error) {
 		return Provider{}, err
 	}
 	_, err = s.db.Exec(
-		`INSERT INTO providers(id, name, type, base_url, api_key_encrypted, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		in.ID, in.Name, in.Type, in.BaseURL, encrypted, now, now,
+		`INSERT INTO providers(id, name, type, base_url, api_key_encrypted, capability_config, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		in.ID, in.Name, in.Type, in.BaseURL, encrypted, in.CapabilityConfig, now, now,
 	)
 	if err != nil {
 		return Provider{}, err
 	}
-	return Provider{ID: in.ID, Name: in.Name, Type: in.Type, BaseURL: in.BaseURL, APIKey: in.APIKey, CreatedAt: now, UpdatedAt: now}, nil
+	return Provider{ID: in.ID, Name: in.Name, Type: in.Type, BaseURL: in.BaseURL, APIKey: in.APIKey, CapabilityConfig: in.CapabilityConfig, CreatedAt: now, UpdatedAt: now}, nil
 }
 
 func (s *Store) UpdateProvider(in ProviderInput) (Provider, error) {
+	in = withDefaultCapabilityConfig(in)
 	if err := validateProvider(in); err != nil {
 		return Provider{}, err
 	}
@@ -248,8 +261,8 @@ func (s *Store) UpdateProvider(in ProviderInput) (Provider, error) {
 		return Provider{}, err
 	}
 	result, err := s.db.Exec(
-		`UPDATE providers SET name = ?, type = ?, base_url = ?, api_key_encrypted = ?, updated_at = ? WHERE id = ?`,
-		in.Name, in.Type, in.BaseURL, encrypted, now, in.ID,
+		`UPDATE providers SET name = ?, type = ?, base_url = ?, api_key_encrypted = ?, capability_config = ?, updated_at = ? WHERE id = ?`,
+		in.Name, in.Type, in.BaseURL, encrypted, in.CapabilityConfig, now, in.ID,
 	)
 	if err != nil {
 		return Provider{}, err
@@ -257,7 +270,7 @@ func (s *Store) UpdateProvider(in ProviderInput) (Provider, error) {
 	if rows, _ := result.RowsAffected(); rows == 0 {
 		return Provider{}, sql.ErrNoRows
 	}
-	return Provider{ID: in.ID, Name: in.Name, Type: in.Type, BaseURL: in.BaseURL, APIKey: in.APIKey, UpdatedAt: now}, nil
+	return Provider{ID: in.ID, Name: in.Name, Type: in.Type, BaseURL: in.BaseURL, APIKey: in.APIKey, CapabilityConfig: in.CapabilityConfig, UpdatedAt: now}, nil
 }
 
 func (s *Store) DeleteProvider(id string) error {
@@ -348,12 +361,12 @@ func (s *Store) GetRoutedModel(publicModel string) (RoutedModel, error) {
 	var routed RoutedModel
 	var encrypted string
 	err := s.db.QueryRow(`
-SELECT p.id, p.name, p.type, p.base_url, p.api_key_encrypted, p.created_at, p.updated_at,
+SELECT p.id, p.name, p.type, p.base_url, p.api_key_encrypted, p.capability_config, p.created_at, p.updated_at,
        m.id, m.provider_id, m.name, m.capabilities, m.context_length, m.max_tokens, m.enabled, m.created_at, m.updated_at
 FROM models m
 JOIN providers p ON p.id = m.provider_id
 WHERE m.provider_id = ? AND m.id = ?`, providerID, modelID).Scan(
-		&routed.Provider.ID, &routed.Provider.Name, &routed.Provider.Type, &routed.Provider.BaseURL, &encrypted, &routed.Provider.CreatedAt, &routed.Provider.UpdatedAt,
+		&routed.Provider.ID, &routed.Provider.Name, &routed.Provider.Type, &routed.Provider.BaseURL, &encrypted, &routed.Provider.CapabilityConfig, &routed.Provider.CreatedAt, &routed.Provider.UpdatedAt,
 		&routed.Model.ID, &routed.Model.ProviderID, &routed.Model.Name, &routed.Model.Capabilities, &routed.Model.ContextLength, &routed.Model.MaxTokens, &routed.Model.Enabled, &routed.Model.CreatedAt, &routed.Model.UpdatedAt,
 	)
 	if err != nil {
@@ -494,6 +507,9 @@ func validateProvider(in ProviderInput) error {
 	if strings.TrimSpace(in.BaseURL) == "" {
 		return errors.New("provider baseUrl is required")
 	}
+	if err := capabilities.Validate(in.CapabilityConfig); err != nil {
+		return fmt.Errorf("provider capabilityConfig is invalid: %w", err)
+	}
 	return nil
 }
 
@@ -536,6 +552,69 @@ func (s *Store) ensureModelEnabledColumn() error {
 	}
 	_, err = s.db.Exec(`ALTER TABLE models ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1`)
 	return err
+}
+
+func (s *Store) ensureProviderCapabilityConfigColumn() error {
+	rows, err := s.db.Query(`PRAGMA table_info(providers)`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull, pk int
+		var dflt any
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &dflt, &pk); err != nil {
+			return err
+		}
+		if name == "capability_config" {
+			return s.backfillProviderCapabilityConfig()
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if _, err := s.db.Exec(`ALTER TABLE providers ADD COLUMN capability_config TEXT NOT NULL DEFAULT ''`); err != nil {
+		return err
+	}
+	return s.backfillProviderCapabilityConfig()
+}
+
+func (s *Store) backfillProviderCapabilityConfig() error {
+	rows, err := s.db.Query(`SELECT id, type FROM providers WHERE capability_config = ''`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	type providerType struct {
+		id  string
+		typ string
+	}
+	var items []providerType
+	for rows.Next() {
+		var item providerType
+		if err := rows.Scan(&item.id, &item.typ); err != nil {
+			return err
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, item := range items {
+		if _, err := s.db.Exec(`UPDATE providers SET capability_config = ? WHERE id = ?`, capabilities.DefaultJSON(item.typ), item.id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func withDefaultCapabilityConfig(in ProviderInput) ProviderInput {
+	if strings.TrimSpace(in.CapabilityConfig) == "" {
+		in.CapabilityConfig = capabilities.DefaultJSON(in.Type)
+	}
+	return in
 }
 
 func inputEnabled(in ModelInput) bool {

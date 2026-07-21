@@ -2,6 +2,7 @@ package relay
 
 import (
 	"bytes"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -96,6 +97,74 @@ func TestChatCompletionRelayAndLogs(t *testing.T) {
 	}
 }
 
+func TestDeepSeekReasoningContentRoundTrip(t *testing.T) {
+	var upstreamReasoning any
+	var upstreamContent any
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Messages []map[string]any `json:"messages"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatal(err)
+		}
+		upstreamReasoning = req.Messages[1]["reasoning_content"]
+		upstreamContent = req.Messages[1]["content"]
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"id":"chatcmpl_test",
+			"model":"deepseek-v4-pro",
+			"choices":[{"index":0,"message":{"role":"assistant","content":"done","reasoning_content":"new thinking"},"finish_reason":"stop"}]
+		}`))
+	}))
+	defer upstream.Close()
+
+	s := openRelayStore(t)
+	defer s.Close()
+	if _, err := s.CreateProvider(store.ProviderInput{ID: "deepseek", Name: "DeepSeek", Type: "deepseek", BaseURL: upstream.URL}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CreateModel(store.ModelInput{ID: "deepseek-v4-pro", ProviderID: "deepseek", Name: "DeepSeek V4 Pro"}); err != nil {
+		t.Fatal(err)
+	}
+
+	relay := New(s)
+	defer relay.Close()
+	server := httptest.NewServer(relay)
+	defer server.Close()
+	resp, err := http.Post(server.URL+"/v1/chat/completions", "application/json", bytes.NewBufferString(`{
+		"model":"deepseek/deepseek-v4-pro",
+		"messages":[
+			{"role":"user","content":"weather?"},
+			{"role":"assistant","content":"","reasoning_content":"need a tool","tool_calls":[{"id":"call_1","type":"function","function":{"name":"get_weather","arguments":"{}"}}]},
+			{"role":"tool","tool_call_id":"call_1","content":"sunny"}
+		]
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	if upstreamReasoning != "need a tool" || upstreamContent != "" {
+		t.Fatalf("upstream assistant history reasoning/content = %#v/%#v", upstreamReasoning, upstreamContent)
+	}
+	var out struct {
+		Choices []struct {
+			Message struct {
+				Content          string `json:"content"`
+				ReasoningContent string `json:"reasoning_content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Choices[0].Message.Content != "done" || out.Choices[0].Message.ReasoningContent != "new thinking" {
+		t.Fatalf("client response = %#v", out.Choices[0].Message)
+	}
+}
+
 func TestDisabledModelIsRejected(t *testing.T) {
 	s := openRelayStore(t)
 	defer s.Close()
@@ -120,6 +189,45 @@ func TestDisabledModelIsRejected(t *testing.T) {
 		t.Fatalf("status = %d", resp.StatusCode)
 	}
 	if code := errorCode(t, resp); code != "model_disabled" {
+		t.Fatalf("code = %q", code)
+	}
+}
+
+func TestBadProviderCapabilityConfigIsRejected(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "localrelay.db")
+	s, err := store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if _, err := s.CreateProvider(store.ProviderInput{ID: "p1", Name: "P1", Type: "openai", BaseURL: "https://example.test/v1"}); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`UPDATE providers SET capability_config = ? WHERE id = 'p1'`, `{`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CreateModel(store.ModelInput{ID: "m1", ProviderID: "p1", Name: "M1"}); err != nil {
+		t.Fatal(err)
+	}
+	relay := New(s)
+	defer relay.Close()
+	server := httptest.NewServer(relay)
+	defer server.Close()
+
+	resp, err := http.Post(server.URL+"/v1/chat/completions", "application/json", bytes.NewBufferString(`{"model":"p1/m1","messages":[{"role":"user","content":"x"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	if code := errorCode(t, resp); code != "bad_provider_capabilities" {
 		t.Fatalf("code = %q", code)
 	}
 }
@@ -258,7 +366,7 @@ func TestUpstreamErrorIsPassedThroughAndLoggedTruncated(t *testing.T) {
 func TestChatRequestErrorBranches(t *testing.T) {
 	s := openRelayStore(t)
 	defer s.Close()
-	if _, err := s.CreateProvider(store.ProviderInput{ID: "badtype", Name: "Bad Type", Type: "anthropic", BaseURL: "https://example.test"}); err != nil {
+	if _, err := s.CreateProvider(store.ProviderInput{ID: "badtype", Name: "Bad Type", Type: "anthropic", BaseURL: "https://example.test", CapabilityConfig: `{"protocol":"anthropic_messages"}`}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.CreateModel(store.ModelInput{ID: "m1", ProviderID: "badtype", Name: "M1"}); err != nil {

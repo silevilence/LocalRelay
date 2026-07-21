@@ -77,6 +77,10 @@ type Params struct {
 	Temperature      *float64        `json:"temperature,omitempty"`
 	TopP             *float64        `json:"topP,omitempty"`
 	Stop             []string        `json:"stop,omitempty"`
+	ReasoningEffort  *string         `json:"reasoningEffort,omitempty"`
+	Thinking         json.RawMessage `json:"thinking,omitempty"`
+	EnableThinking   *bool           `json:"enableThinking,omitempty"`
+	ThinkingBudget   *int            `json:"thinkingBudget,omitempty"`
 	PresencePenalty  *float64        `json:"presencePenalty,omitempty"`
 	FrequencyPenalty *float64        `json:"frequencyPenalty,omitempty"`
 	ResponseFormat   json.RawMessage `json:"responseFormat,omitempty"`
