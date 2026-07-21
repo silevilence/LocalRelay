@@ -3,16 +3,21 @@ package main
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
+	"time"
 
+	"localrelay/internal/relay"
 	"localrelay/internal/store"
 )
 
 // App struct
 type App struct {
-	ctx   context.Context
-	store *store.Store
+	ctx         context.Context
+	store       *store.Store
+	relay       *relay.Server
+	relayServer *http.Server
 }
 
 // NewApp creates a new App application struct
@@ -29,9 +34,24 @@ func (a *App) startup(ctx context.Context) {
 		panic(err)
 	}
 	a.store = db
+	a.relay = relay.New(db)
+	a.relayServer = &http.Server{Addr: "127.0.0.1:8718", Handler: a.relay}
+	go func() {
+		if err := a.relayServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			panic(err)
+		}
+	}()
 }
 
 func (a *App) shutdown(ctx context.Context) {
+	if a.relayServer != nil {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		_ = a.relayServer.Shutdown(shutdownCtx)
+	}
+	if a.relay != nil {
+		a.relay.Close()
+	}
 	if a.store != nil {
 		_ = a.store.Close()
 	}
@@ -72,6 +92,14 @@ func (a *App) UpdateModel(input store.ModelInput) (store.Model, error) {
 
 func (a *App) DeleteModel(providerID string, id string) error {
 	return a.store.DeleteModel(providerID, id)
+}
+
+func (a *App) TokenStats(filter store.TokenStatsFilter) (store.TokenStats, error) {
+	return a.store.TokenStats(filter)
+}
+
+func (a *App) RelayBaseURL() string {
+	return "http://127.0.0.1:8718"
 }
 
 func defaultDBPath() string {

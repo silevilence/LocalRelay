@@ -19,6 +19,7 @@ type Request struct {
 	Model            string          `json:"model"`
 	Messages         []Message       `json:"messages"`
 	Tools            []Tool          `json:"tools,omitempty"`
+	Stream           bool            `json:"stream,omitempty"`
 	MaxTokens        *int            `json:"max_tokens,omitempty"`
 	Temperature      *float64        `json:"temperature,omitempty"`
 	TopP             *float64        `json:"top_p,omitempty"`
@@ -68,10 +69,44 @@ type FunctionTool struct {
 	Parameters  json.RawMessage `json:"parameters,omitempty"`
 }
 
+type Response struct {
+	ID      string           `json:"id,omitempty"`
+	Object  string           `json:"object,omitempty"`
+	Created int64            `json:"created,omitempty"`
+	Model   string           `json:"model"`
+	Choices []ResponseChoice `json:"choices"`
+	Usage   *Usage           `json:"usage,omitempty"`
+}
+
+type ResponseChoice struct {
+	Index        int     `json:"index"`
+	Message      Message `json:"message"`
+	FinishReason string  `json:"finish_reason,omitempty"`
+}
+
+type Usage struct {
+	PromptTokens        int                 `json:"prompt_tokens,omitempty"`
+	CompletionTokens    int                 `json:"completion_tokens,omitempty"`
+	TotalTokens         int                 `json:"total_tokens,omitempty"`
+	PromptTokensDetails *PromptTokenDetails `json:"prompt_tokens_details,omitempty"`
+}
+
+type PromptTokenDetails struct {
+	CachedTokens int `json:"cached_tokens,omitempty"`
+}
+
 func Parse(data []byte) (ir.Request, error) {
 	var in Request
 	if err := json.Unmarshal(data, &in); err != nil {
 		return ir.Request{}, err
+	}
+	return in.ToIR()
+}
+
+func ParseResponse(data []byte) (ir.Response, error) {
+	var in Response
+	if err := json.Unmarshal(data, &in); err != nil {
+		return ir.Response{}, err
 	}
 	return in.ToIR()
 }
@@ -108,6 +143,62 @@ func (r Request) ToIR() (ir.Request, error) {
 			return ir.Request{}, err
 		}
 		out.Messages = append(out.Messages, converted)
+	}
+	return out, nil
+}
+
+func (r Response) ToIR() (ir.Response, error) {
+	out := ir.Response{ID: r.ID, Model: r.Model}
+	if r.Usage != nil {
+		out.Usage = ir.Usage{
+			InputTokens:  r.Usage.PromptTokens,
+			OutputTokens: r.Usage.CompletionTokens,
+		}
+		if r.Usage.PromptTokensDetails != nil {
+			out.Usage.CacheReadInputTokens = r.Usage.PromptTokensDetails.CachedTokens
+		}
+	}
+	for _, choice := range r.Choices {
+		msg, err := choice.Message.toIR()
+		if err != nil {
+			return ir.Response{}, err
+		}
+		out.Choices = append(out.Choices, ir.Choice{
+			Index:      choice.Index,
+			Message:    msg,
+			StopReason: choice.FinishReason,
+		})
+	}
+	return out, nil
+}
+
+func FromIRResponse(resp ir.Response) (Response, error) {
+	out := Response{
+		ID:      resp.ID,
+		Object:  "chat.completion",
+		Model:   resp.Model,
+		Choices: make([]ResponseChoice, 0, len(resp.Choices)),
+	}
+	if resp.Usage != (ir.Usage{}) {
+		out.Usage = &Usage{
+			PromptTokens:     resp.Usage.InputTokens,
+			CompletionTokens: resp.Usage.OutputTokens,
+			TotalTokens:      resp.Usage.InputTokens + resp.Usage.OutputTokens,
+		}
+		if resp.Usage.CacheReadInputTokens > 0 {
+			out.Usage.PromptTokensDetails = &PromptTokenDetails{CachedTokens: resp.Usage.CacheReadInputTokens}
+		}
+	}
+	for _, choice := range resp.Choices {
+		msg, err := messageFromIR(choice.Message)
+		if err != nil {
+			return Response{}, err
+		}
+		out.Choices = append(out.Choices, ResponseChoice{
+			Index:        choice.Index,
+			Message:      msg,
+			FinishReason: choice.StopReason,
+		})
 	}
 	return out, nil
 }

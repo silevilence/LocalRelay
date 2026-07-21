@@ -130,6 +130,33 @@ func TestIRToOpenAICompatibleProviderRequest(t *testing.T) {
 	}
 }
 
+func TestProviderResponseRoundTripsThroughIR(t *testing.T) {
+	raw := []byte(`{
+		"id":"chatcmpl_1",
+		"model":"gpt-test",
+		"choices":[{"index":0,"message":{"role":"assistant","content":"Hello"},"finish_reason":"stop"}],
+		"usage":{"prompt_tokens":7,"completion_tokens":3,"total_tokens":10,"prompt_tokens_details":{"cached_tokens":2}}
+	}`)
+	resp, err := ParseResponse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.ID != "chatcmpl_1" || resp.Usage.InputTokens != 7 || resp.Usage.CacheReadInputTokens != 2 {
+		t.Fatalf("ir response = %#v", resp)
+	}
+	resp.Model = "openai/gpt-test"
+	out, err := FromIRResponse(resp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Model != "openai/gpt-test" || out.Usage.TotalTokens != 10 {
+		t.Fatalf("client response = %#v", out)
+	}
+	if out.Choices[0].Message.Content != "Hello" || out.Choices[0].FinishReason != "stop" {
+		t.Fatalf("choice = %#v", out.Choices[0])
+	}
+}
+
 func TestParseRejectsBadInputs(t *testing.T) {
 	tests := []struct {
 		name string

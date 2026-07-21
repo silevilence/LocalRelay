@@ -6,12 +6,14 @@ import {
     DeleteProvider,
     ListModels,
     ListProviders,
+    RelayBaseURL,
+    TokenStats,
     UpdateModel,
     UpdateProvider,
 } from "../wailsjs/go/main/App";
 
 const emptyProvider = {id: "", name: "", type: "openai", baseUrl: "", apiKey: ""};
-const emptyModel = {id: "", providerId: "", name: "", capabilities: "", contextLength: 0, maxTokens: 0};
+const emptyModel = {id: "", providerId: "", name: "", capabilities: "", contextLength: 0, maxTokens: 0, enabled: true};
 
 function App() {
     const [providers, setProviders] = useState([]);
@@ -25,6 +27,9 @@ function App() {
     const [showModelForm, setShowModelForm] = useState(false);
     const [showKey, setShowKey] = useState(false);
     const [message, setMessage] = useState("正在加载本地配置…");
+    const [relayBaseUrl, setRelayBaseUrl] = useState("");
+    const [statsFilter, setStatsFilter] = useState({from: daysAgo(7), to: today(), providerId: "", modelId: ""});
+    const [stats, setStats] = useState({points: [], calls: 0, inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0});
 
     const selectedProvider = useMemo(
         () => providers.find((provider) => provider.id === selectedProviderId),
@@ -49,7 +54,12 @@ function App() {
 
     useEffect(() => {
         refreshProviders();
+        RelayBaseURL().then(setRelayBaseUrl).catch(() => {});
     }, []);
+
+    useEffect(() => {
+        refreshStats();
+    }, [statsFilter]);
 
     useEffect(() => {
         if (selectedProvider) {
@@ -117,6 +127,7 @@ function App() {
             providerId: modelDraft.providerId || selectedProviderId,
             contextLength: Number(modelDraft.contextLength) || 0,
             maxTokens: Number(modelDraft.maxTokens) || 0,
+            enabled: modelDraft.enabled !== false,
         };
         if (!payload.providerId || !payload.id || !payload.name) {
             setMessage("模型所属平台、ID 和名称必填。");
@@ -163,9 +174,23 @@ function App() {
     }
 
     function editModel(model) {
-        setModelDraft(model);
+        setModelDraft({...model, enabled: model.enabled !== false});
         setEditingModel(true);
         setShowModelForm(true);
+    }
+
+    async function refreshStats() {
+        try {
+            const result = await TokenStats({
+                from: statsFilter.from ? `${statsFilter.from}T00:00:00Z` : "",
+                to: statsFilter.to ? `${statsFilter.to}T23:59:59Z` : "",
+                providerId: statsFilter.providerId,
+                modelId: statsFilter.modelId,
+            });
+            setStats(result || {points: []});
+        } catch (error) {
+            setMessage(`加载统计失败：${error}`);
+        }
     }
 
     const providerCount = providers.length;
@@ -288,6 +313,15 @@ function App() {
                                     </div>
                                 </section>
                             )}
+
+                            <StatsPanel
+                                baseUrl={relayBaseUrl}
+                                stats={stats}
+                                filter={statsFilter}
+                                providers={providers}
+                                onChange={(patch) => setStatsFilter({...statsFilter, ...patch})}
+                                onRefresh={refreshStats}
+                            />
                         </>
                     ) : (
                         <div className="grid h-[70vh] place-items-center rounded-3xl border border-dashed border-zinc-800 text-zinc-500">
@@ -370,6 +404,10 @@ function ModelForm({draft, editing, onChange, onSubmit, onCancel}) {
             <Field label="能力 JSON" value={draft.capabilities} onChange={(capabilities) => onChange({capabilities})} placeholder='{"tools":true}' />
             <Field label="上下文长度" type="number" value={draft.contextLength} onChange={(contextLength) => onChange({contextLength})} />
             <Field label="Max Tokens" type="number" value={draft.maxTokens} onChange={(maxTokens) => onChange({maxTokens})} />
+            <label className="flex items-end gap-2 pb-2 text-sm font-semibold text-zinc-300">
+                <input type="checkbox" checked={draft.enabled !== false} onChange={(event) => onChange({enabled: event.target.checked})} />
+                对外提供
+            </label>
             <div className="flex items-end gap-2">
                 <button className="rounded-xl bg-zinc-100 px-4 py-2 font-bold text-zinc-950" type="submit">{editing ? "更新" : "添加"}</button>
                 <button className="rounded-xl border border-zinc-700 px-4 py-2 font-bold text-zinc-300" type="button" onClick={onCancel}>取消</button>
@@ -394,14 +432,130 @@ function ModelGroup({family, models, onEdit, onDelete}) {
                         <span className="text-2xl">✦</span>
                         <div className="min-w-0 flex-1">
                             <div className="truncate text-xl font-semibold">{model.name || model.id}</div>
-                            <div className="text-xs text-zinc-500">context {model.contextLength || 0} · max {model.maxTokens || 0}</div>
+                            <div className="text-xs text-zinc-500">context {model.contextLength || 0} · max {model.maxTokens || 0} · route {model.providerId}/{model.id}</div>
                         </div>
+                        <span className={`rounded-full px-2.5 py-1 text-xs font-bold ${model.enabled !== false ? "bg-green-950 text-green-400" : "bg-zinc-800 text-zinc-500"}`}>
+                            {model.enabled !== false ? "OPEN" : "OFF"}
+                        </span>
                         <CapabilityPills value={model.capabilities} />
                         <button className="text-zinc-400 hover:text-zinc-100" type="button" onClick={() => onEdit(model)}>◎</button>
                         <button className="text-xl text-zinc-400 hover:text-red-300" type="button" onClick={() => onDelete(model)}>-</button>
                     </div>
                 ))}
             </div>
+        </div>
+    );
+}
+
+function StatsPanel({baseUrl, stats, filter, providers, onChange, onRefresh}) {
+    const points = stats.points || [];
+    return (
+        <section className="mt-7 rounded-2xl border border-zinc-800 bg-zinc-950/30 p-5">
+            <div className="mb-4 flex flex-wrap items-end justify-between gap-3">
+                <div>
+                    <h2 className="text-xl font-bold">Token 统计</h2>
+                    <p className="mt-1 text-sm text-zinc-500">本地入口：{baseUrl ? `${baseUrl}/v1/chat/completions` : "启动中…"}</p>
+                </div>
+                <div className="flex flex-wrap items-end gap-2">
+                    <Field label="开始" type="date" value={filter.from} onChange={(from) => onChange({from})} />
+                    <Field label="结束" type="date" value={filter.to} onChange={(to) => onChange({to})} />
+                    <label className="grid gap-1 text-sm font-semibold text-zinc-300">
+                        平台
+                        <select className="rounded-xl border border-zinc-700 bg-[#151515] px-3 py-2.5 text-zinc-100 outline-none" value={filter.providerId} onChange={(event) => onChange({providerId: event.target.value})}>
+                            <option value="">全部</option>
+                            {providers.map((provider) => <option key={provider.id} value={provider.id}>{provider.name}</option>)}
+                        </select>
+                    </label>
+                    <Field label="模型 ID" value={filter.modelId} onChange={(modelId) => onChange({modelId})} placeholder="gpt-4.1-mini" />
+                    <button className="rounded-xl bg-zinc-100 px-4 py-2.5 font-bold text-zinc-950" type="button" onClick={onRefresh}>刷新</button>
+                </div>
+            </div>
+
+            <div className="grid gap-3 md:grid-cols-5">
+                <StatCard label="调用" value={stats.calls || 0} />
+                <StatCard label="输入" value={stats.inputTokens || 0} />
+                <StatCard label="输出" value={stats.outputTokens || 0} />
+                <StatCard label="缓存写入" value={stats.cacheCreationInputTokens || 0} />
+                <StatCard label="缓存命中" value={stats.cacheReadInputTokens || 0} />
+            </div>
+
+            <div className="mt-4 flex flex-wrap gap-3 text-xs text-zinc-400">
+                <Legend color="bg-emerald-500" label="非缓存输入" />
+                <Legend color="bg-sky-500" label="输出" />
+                <Legend color="bg-amber-500" label="缓存写入" />
+                <Legend color="bg-violet-500" label="缓存命中" />
+            </div>
+
+            <div className="mt-4 overflow-hidden rounded-xl border border-zinc-800">
+                {points.length > 0 && <TokenTrendChart points={points} />}
+                {!points.length && <div className="px-4 py-8 text-center text-zinc-500">暂无调用日志。</div>}
+            </div>
+        </section>
+    );
+}
+
+function TokenTrendChart({points}) {
+    const width = 720;
+    const labelWidth = 110;
+    const valueWidth = 130;
+    const chartWidth = width - labelWidth - valueWidth;
+    const rowHeight = 36;
+    const height = points.length * rowHeight + 12;
+    const maxTokens = Math.max(1, ...points.map((point) => tokenTotal(point)));
+    return (
+        <svg className="h-auto w-full" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Token 趋势图">
+            {points.map((point, index) => {
+                const y = index * rowHeight + 18;
+                const parts = tokenParts(point);
+                let x = labelWidth;
+                return (
+                    <g key={point.date}>
+                        <text x="16" y={y + 5} fill="#a1a1aa" fontSize="13">{point.date}</text>
+                        <rect x={labelWidth} y={y - 8} width={chartWidth} height="12" rx="6" fill="#27272a" />
+                        {parts.map((part) => {
+                            const w = Math.round((part.value / maxTokens) * chartWidth);
+                            const rect = <rect key={part.name} x={x} y={y - 8} width={w} height="12" fill={part.color} />;
+                            x += w;
+                            return rect;
+                        })}
+                        <text x={width - 16} y={y + 5} fill="#d4d4d8" fontSize="13" textAnchor="end">
+                            {tokenTotal(point)} tokens · {point.calls} 次
+                        </text>
+                    </g>
+                );
+            })}
+        </svg>
+    );
+}
+
+function tokenParts(point) {
+    const cache = (point.cacheCreationInputTokens || 0) + (point.cacheReadInputTokens || 0);
+    return [
+        {name: "input", value: Math.max(0, (point.inputTokens || 0) - cache), color: "#10b981"},
+        {name: "output", value: point.outputTokens || 0, color: "#0ea5e9"},
+        {name: "cacheCreate", value: point.cacheCreationInputTokens || 0, color: "#f59e0b"},
+        {name: "cacheRead", value: point.cacheReadInputTokens || 0, color: "#8b5cf6"},
+    ].filter((part) => part.value > 0);
+}
+
+function tokenTotal(point) {
+    return (point.inputTokens || 0) + (point.outputTokens || 0);
+}
+
+function Legend({color, label}) {
+    return (
+        <span className="inline-flex items-center gap-1">
+            <span className={`h-2.5 w-2.5 rounded-full ${color}`} />
+            {label}
+        </span>
+    );
+}
+
+function StatCard({label, value}) {
+    return (
+        <div className="rounded-xl border border-zinc-800 bg-[#151515] p-4">
+            <div className="text-sm text-zinc-500">{label}</div>
+            <div className="mt-1 text-2xl font-bold">{Number(value || 0).toLocaleString()}</div>
         </div>
     );
 }
@@ -465,7 +619,17 @@ function modelFamily(id = "") {
 
 function previewChatUrl(baseUrl = "") {
     const trimmed = baseUrl.trim().replace(/\/+$/, "");
-    return trimmed ? `${trimmed}/v1/chat/completions` : "填写 API 地址后显示";
+    return trimmed ? `${trimmed}/chat/completions` : "填写 API 地址后显示";
+}
+
+function today() {
+    return new Date().toISOString().slice(0, 10);
+}
+
+function daysAgo(days) {
+    const date = new Date();
+    date.setDate(date.getDate() - days);
+    return date.toISOString().slice(0, 10);
 }
 
 export default App

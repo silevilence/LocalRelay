@@ -16,6 +16,10 @@ export function ListModels(arg1:string):Promise<Array<store.Model>>;
 
 export function ListProviders():Promise<Array<store.Provider>>;
 
+export function RelayBaseURL():Promise<string>;
+
+export function TokenStats(arg1:store.TokenStatsFilter):Promise<store.TokenStats>;
+
 export function UpdateModel(arg1:store.ModelInput):Promise<store.Model>;
 
 export function UpdateProvider(arg1:store.ProviderInput):Promise<store.Provider>;

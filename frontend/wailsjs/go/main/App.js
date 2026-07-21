@@ -30,6 +30,14 @@ export function ListProviders() {
   return window['go']['main']['App']['ListProviders']();
 }
 
+export function RelayBaseURL() {
+  return window['go']['main']['App']['RelayBaseURL']();
+}
+
+export function TokenStats(arg1) {
+  return window['go']['main']['App']['TokenStats'](arg1);
+}
+
 export function UpdateModel(arg1) {
   return window['go']['main']['App']['UpdateModel'](arg1);
 }
