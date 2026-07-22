@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -23,7 +24,10 @@ import (
 var (
 	ErrInvalidModelID = errors.New("model must use providerId/modelId")
 	ErrModelDisabled  = errors.New("model is disabled")
+	newAPIKey         = generateAPIKey
 )
+
+const NoAppName = "无应用"
 
 type Store struct {
 	db  *sql.DB
@@ -80,14 +84,34 @@ type RoutedModel struct {
 	Model    Model    `json:"model"`
 }
 
+type APIKey struct {
+	ID          int64  `json:"id"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Key         string `json:"key"`
+	DeletedAt   string `json:"deletedAt,omitempty"`
+	CreatedAt   string `json:"createdAt"`
+	UpdatedAt   string `json:"updatedAt"`
+}
+
+type APIKeyInput struct {
+	ID          int64  `json:"id"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+}
+
 type CallLog struct {
+	ID                       int64  `json:"id"`
 	ProviderID               string `json:"providerId"`
 	ModelID                  string `json:"modelId"`
+	AppName                  string `json:"appName"`
 	Protocol                 string `json:"protocol"`
 	StartedAt                string `json:"startedAt"`
 	EndedAt                  string `json:"endedAt,omitempty"`
 	StatusCode               int    `json:"statusCode"`
 	Error                    string `json:"error,omitempty"`
+	DurationMs               int64  `json:"durationMs"`
+	Stream                   bool   `json:"stream"`
 	InputTokens              int    `json:"inputTokens"`
 	OutputTokens             int    `json:"outputTokens"`
 	CacheCreationInputTokens int    `json:"cacheCreationInputTokens"`
@@ -99,6 +123,7 @@ type TokenStatsFilter struct {
 	To         string `json:"to"`
 	ProviderID string `json:"providerId"`
 	ModelID    string `json:"modelId"`
+	AppName    string `json:"appName"`
 }
 
 type TokenStats struct {
@@ -117,6 +142,32 @@ type TokenStatPoint struct {
 	CacheCreationInputTokens int    `json:"cacheCreationInputTokens"`
 	CacheReadInputTokens     int    `json:"cacheReadInputTokens"`
 	Calls                    int    `json:"calls"`
+}
+
+type TokenStatRow struct {
+	Name                     string  `json:"name"`
+	Calls                    int     `json:"calls"`
+	InputTokens              int     `json:"inputTokens"`
+	OutputTokens             int     `json:"outputTokens"`
+	CacheCreationInputTokens int     `json:"cacheCreationInputTokens"`
+	CacheReadInputTokens     int     `json:"cacheReadInputTokens"`
+	TotalTokens              int     `json:"totalTokens"`
+	Share                    float64 `json:"share"`
+}
+
+type TokenTrendPoint struct {
+	Bucket                   string `json:"bucket"`
+	Name                     string `json:"name"`
+	Calls                    int    `json:"calls"`
+	InputTokens              int    `json:"inputTokens"`
+	OutputTokens             int    `json:"outputTokens"`
+	CacheCreationInputTokens int    `json:"cacheCreationInputTokens"`
+	CacheReadInputTokens     int    `json:"cacheReadInputTokens"`
+}
+
+type CallLogPage struct {
+	Items []CallLog `json:"items"`
+	Total int       `json:"total"`
 }
 
 func Open(path string) (*Store, error) {
@@ -179,17 +230,29 @@ CREATE TABLE IF NOT EXISTS call_logs (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
 	provider_id TEXT,
 	model_id TEXT,
+	app_name TEXT NOT NULL DEFAULT '无应用',
 	protocol TEXT NOT NULL,
 	started_at TEXT NOT NULL,
 	ended_at TEXT,
 	status_code INTEGER,
 	error TEXT,
+	is_stream INTEGER NOT NULL DEFAULT 0,
 	input_tokens INTEGER NOT NULL DEFAULT 0,
 	output_tokens INTEGER NOT NULL DEFAULT 0,
 	cache_creation_input_tokens INTEGER NOT NULL DEFAULT 0,
 	cache_read_input_tokens INTEGER NOT NULL DEFAULT 0,
 	created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
 	FOREIGN KEY (provider_id) REFERENCES providers(id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS api_keys (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	name TEXT NOT NULL,
+	description TEXT NOT NULL DEFAULT '',
+	key TEXT NOT NULL UNIQUE,
+	deleted_at TEXT,
+	created_at TEXT NOT NULL,
+	updated_at TEXT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_models_provider_id ON models(provider_id);
@@ -201,10 +264,34 @@ INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (1, CURRENT_
 	if err != nil {
 		return err
 	}
-	if err := s.ensureProviderCapabilityConfigColumn(); err != nil {
-		return err
+	return s.applyMigrations()
+}
+
+func (s *Store) applyMigrations() error {
+	migrations := []struct {
+		version int
+		run     func() error
+	}{
+		{2, s.ensureProviderCapabilityConfigColumn},
+		{3, s.ensureModelEnabledColumn},
+		{4, s.ensureAPIKeyStatsSchema},
 	}
-	return s.ensureModelEnabledColumn()
+	for _, migration := range migrations {
+		var exists int
+		if err := s.db.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE version = ?`, migration.version).Scan(&exists); err != nil {
+			return err
+		}
+		if exists > 0 {
+			continue
+		}
+		if err := migration.run(); err != nil {
+			return err
+		}
+		if _, err := s.db.Exec(`INSERT INTO schema_migrations(version, applied_at) VALUES (?, CURRENT_TIMESTAMP)`, migration.version); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Store) ListProviders() ([]Provider, error) {
@@ -407,6 +494,104 @@ ORDER BY m.provider_id, m.name`)
 	return models, rows.Err()
 }
 
+func (s *Store) ListAPIKeys() ([]APIKey, error) {
+	rows, err := s.db.Query(`SELECT id, name, description, key, COALESCE(deleted_at, ''), created_at, updated_at FROM api_keys WHERE deleted_at IS NULL ORDER BY name, id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var keys []APIKey
+	for rows.Next() {
+		var key APIKey
+		if err := rows.Scan(&key.ID, &key.Name, &key.Description, &key.Key, &key.DeletedAt, &key.CreatedAt, &key.UpdatedAt); err != nil {
+			return nil, err
+		}
+		keys = append(keys, key)
+	}
+	return keys, rows.Err()
+}
+
+func (s *Store) CreateAPIKey(in APIKeyInput) (APIKey, error) {
+	if err := validateAPIKeyInput(in); err != nil {
+		return APIKey{}, err
+	}
+	now := timestamp()
+	for i := 0; i < 3; i++ {
+		key, err := newAPIKey()
+		if err != nil {
+			return APIKey{}, err
+		}
+		result, err := s.db.Exec(
+			`INSERT INTO api_keys(name, description, key, created_at, updated_at) VALUES (?, ?, ?, ?, ?)`,
+			strings.TrimSpace(in.Name), strings.TrimSpace(in.Description), key, now, now,
+		)
+		if err == nil {
+			id, _ := result.LastInsertId()
+			return APIKey{ID: id, Name: strings.TrimSpace(in.Name), Description: strings.TrimSpace(in.Description), Key: key, CreatedAt: now, UpdatedAt: now}, nil
+		}
+		if !strings.Contains(err.Error(), "UNIQUE") {
+			return APIKey{}, err
+		}
+	}
+	return APIKey{}, errors.New("api key generation collided")
+}
+
+func (s *Store) UpdateAPIKey(in APIKeyInput) (APIKey, error) {
+	if in.ID <= 0 {
+		return APIKey{}, errors.New("api key id is required")
+	}
+	if err := validateAPIKeyInput(in); err != nil {
+		return APIKey{}, err
+	}
+	now := timestamp()
+	result, err := s.db.Exec(
+		`UPDATE api_keys SET name = ?, description = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL`,
+		strings.TrimSpace(in.Name), strings.TrimSpace(in.Description), now, in.ID,
+	)
+	if err != nil {
+		return APIKey{}, err
+	}
+	if rows, _ := result.RowsAffected(); rows == 0 {
+		return APIKey{}, sql.ErrNoRows
+	}
+	var key APIKey
+	err = s.db.QueryRow(`SELECT id, name, description, key, COALESCE(deleted_at, ''), created_at, updated_at FROM api_keys WHERE id = ?`, in.ID).
+		Scan(&key.ID, &key.Name, &key.Description, &key.Key, &key.DeletedAt, &key.CreatedAt, &key.UpdatedAt)
+	return key, err
+}
+
+func (s *Store) DeleteAPIKey(id int64) error {
+	if id <= 0 {
+		return errors.New("api key id is required")
+	}
+	now := timestamp()
+	result, err := s.db.Exec(`UPDATE api_keys SET deleted_at = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL`, now, now, id)
+	if err != nil {
+		return err
+	}
+	if rows, _ := result.RowsAffected(); rows == 0 {
+		return sql.ErrNoRows
+	}
+	return err
+}
+
+func (s *Store) AppNameForAuthorization(header string) string {
+	value := strings.TrimSpace(header)
+	if value == "" {
+		return NoAppName
+	}
+	prefix, token, ok := strings.Cut(value, " ")
+	if !ok || !strings.EqualFold(prefix, "Bearer") || strings.TrimSpace(token) == "" {
+		return NoAppName
+	}
+	var name string
+	err := s.db.QueryRow(`SELECT name FROM api_keys WHERE key = ? AND deleted_at IS NULL`, strings.TrimSpace(token)).Scan(&name)
+	if err != nil || strings.TrimSpace(name) == "" {
+		return NoAppName
+	}
+	return name
+}
+
 func (s *Store) CreateCallLog(log CallLog) error {
 	return s.CreateCallLogs([]CallLog{log})
 }
@@ -417,19 +602,22 @@ func (s *Store) CreateCallLogs(logs []CallLog) error {
 	}
 	var query strings.Builder
 	query.WriteString(`
-INSERT INTO call_logs(provider_id, model_id, protocol, started_at, ended_at, status_code, error, input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens)
+INSERT INTO call_logs(provider_id, model_id, app_name, protocol, started_at, ended_at, status_code, error, is_stream, input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens)
 VALUES `)
-	args := make([]any, 0, len(logs)*11)
+	args := make([]any, 0, len(logs)*13)
 	for i, log := range logs {
 		if log.StartedAt == "" {
 			log.StartedAt = timestamp()
 		}
+		if strings.TrimSpace(log.AppName) == "" {
+			log.AppName = NoAppName
+		}
 		if i > 0 {
 			query.WriteString(",")
 		}
-		query.WriteString("(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+		query.WriteString("(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
 		args = append(args,
-			nullable(log.ProviderID), nullable(log.ModelID), log.Protocol, log.StartedAt, nullable(log.EndedAt), log.StatusCode, nullable(log.Error),
+			nullable(log.ProviderID), nullable(log.ModelID), log.AppName, log.Protocol, log.StartedAt, nullable(log.EndedAt), log.StatusCode, nullable(log.Error), log.Stream,
 			log.InputTokens, log.OutputTokens, log.CacheCreationInputTokens, log.CacheReadInputTokens,
 		)
 	}
@@ -498,6 +686,137 @@ ORDER BY model_id`, args...)
 	return models, rows.Err()
 }
 
+func (s *Store) TokenStatApps(filter TokenStatsFilter) ([]string, error) {
+	filter = normalizeStatsFilter(TokenStatsFilter{From: filter.From, To: filter.To, ProviderID: filter.ProviderID, ModelID: filter.ModelID})
+	where, args := statsWhere(filter)
+	rows, err := s.db.Query(`
+SELECT DISTINCT app_name
+FROM call_logs`+where+`
+ORDER BY app_name`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var apps []string
+	for rows.Next() {
+		var app string
+		if err := rows.Scan(&app); err != nil {
+			return nil, err
+		}
+		apps = append(apps, app)
+	}
+	return apps, rows.Err()
+}
+
+func (s *Store) TokenStatRows(filter TokenStatsFilter, groupBy string) ([]TokenStatRow, error) {
+	filter = normalizeStatsFilter(filter)
+	column, fallback, err := statGroupColumn(groupBy)
+	if err != nil {
+		return nil, err
+	}
+	where, args := statsWhere(filter)
+	rows, err := s.db.Query(fmt.Sprintf(`
+SELECT COALESCE(NULLIF(%s, ''), ?), COUNT(*), COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0),
+       COALESCE(SUM(cache_creation_input_tokens), 0), COALESCE(SUM(cache_read_input_tokens), 0)
+FROM call_logs%s
+GROUP BY COALESCE(NULLIF(%s, ''), ?)
+ORDER BY COALESCE(SUM(input_tokens + output_tokens), 0) DESC`, column, where, column), append([]any{fallback}, append(args, fallback)...)...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var rowsOut []TokenStatRow
+	var total int
+	for rows.Next() {
+		var row TokenStatRow
+		if err := rows.Scan(&row.Name, &row.Calls, &row.InputTokens, &row.OutputTokens, &row.CacheCreationInputTokens, &row.CacheReadInputTokens); err != nil {
+			return nil, err
+		}
+		row.TotalTokens = row.InputTokens + row.OutputTokens
+		total += row.TotalTokens
+		rowsOut = append(rowsOut, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for i := range rowsOut {
+		if total > 0 {
+			rowsOut[i].Share = float64(rowsOut[i].TotalTokens) / float64(total)
+		}
+	}
+	return rowsOut, nil
+}
+
+func (s *Store) TokenTrend(filter TokenStatsFilter, grain string, groupBy string) ([]TokenTrendPoint, error) {
+	if err := validateStatsGrain(filter, grain); err != nil {
+		return nil, err
+	}
+	filter = normalizeStatsFilter(filter)
+	bucket, err := statBucketExpr(grain)
+	if err != nil {
+		return nil, err
+	}
+	column, fallback, err := statGroupColumn(groupBy)
+	if err != nil {
+		return nil, err
+	}
+	where, args := statsWhere(filter)
+	rows, err := s.db.Query(fmt.Sprintf(`
+SELECT %s, COALESCE(NULLIF(%s, ''), ?), COUNT(*), COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0),
+       COALESCE(SUM(cache_creation_input_tokens), 0), COALESCE(SUM(cache_read_input_tokens), 0)
+FROM call_logs%s
+GROUP BY %s, COALESCE(NULLIF(%s, ''), ?)
+ORDER BY %s`, bucket, column, where, bucket, column, bucket), append([]any{fallback}, append(args, fallback)...)...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var points []TokenTrendPoint
+	for rows.Next() {
+		var point TokenTrendPoint
+		if err := rows.Scan(&point.Bucket, &point.Name, &point.Calls, &point.InputTokens, &point.OutputTokens, &point.CacheCreationInputTokens, &point.CacheReadInputTokens); err != nil {
+			return nil, err
+		}
+		points = append(points, point)
+	}
+	return points, rows.Err()
+}
+
+func (s *Store) CallLogs(filter TokenStatsFilter, page int, pageSize int) (CallLogPage, error) {
+	filter = normalizeStatsFilter(filter)
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 || pageSize > 10000 {
+		pageSize = 50
+	}
+	where, args := statsWhere(filter)
+	var out CallLogPage
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM call_logs`+where, args...).Scan(&out.Total); err != nil {
+		return CallLogPage{}, err
+	}
+	rows, err := s.db.Query(`
+SELECT id, COALESCE(provider_id, ''), COALESCE(model_id, ''), app_name, protocol, started_at, COALESCE(ended_at, ''),
+       COALESCE(status_code, 0), COALESCE(error, ''), is_stream, input_tokens, output_tokens,
+       cache_creation_input_tokens, cache_read_input_tokens
+FROM call_logs`+where+`
+ORDER BY started_at DESC, id DESC
+LIMIT ? OFFSET ?`, append(args, pageSize, (page-1)*pageSize)...)
+	if err != nil {
+		return CallLogPage{}, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var log CallLog
+		if err := rows.Scan(&log.ID, &log.ProviderID, &log.ModelID, &log.AppName, &log.Protocol, &log.StartedAt, &log.EndedAt, &log.StatusCode, &log.Error, &log.Stream, &log.InputTokens, &log.OutputTokens, &log.CacheCreationInputTokens, &log.CacheReadInputTokens); err != nil {
+			return CallLogPage{}, err
+		}
+		log.DurationMs = durationMs(log.StartedAt, log.EndedAt)
+		out.Items = append(out.Items, log)
+	}
+	return out, rows.Err()
+}
+
 func normalizeStatsFilter(filter TokenStatsFilter) TokenStatsFilter {
 	if len(filter.From) == len("2006-01-02") {
 		filter.From += "T00:00:00Z"
@@ -527,10 +846,65 @@ func statsWhere(filter TokenStatsFilter) (string, []any) {
 		clauses = append(clauses, "model_id = ?")
 		args = append(args, filter.ModelID)
 	}
+	if strings.TrimSpace(filter.AppName) != "" {
+		clauses = append(clauses, "app_name = ?")
+		args = append(args, filter.AppName)
+	}
 	if len(clauses) == 0 {
 		return "", nil
 	}
 	return " WHERE " + strings.Join(clauses, " AND "), args
+}
+
+func statGroupColumn(groupBy string) (string, string, error) {
+	switch groupBy {
+	case "", "provider":
+		return "provider_id", "未知平台", nil
+	case "model":
+		return "model_id", "未知模型", nil
+	case "app":
+		return "app_name", NoAppName, nil
+	default:
+		return "", "", errors.New("unsupported stat group")
+	}
+}
+
+func statBucketExpr(grain string) (string, error) {
+	switch grain {
+	case "", "day":
+		return "substr(started_at, 1, 10)", nil
+	case "hour":
+		return "substr(started_at, 1, 13) || ':00'", nil
+	case "week":
+		return "strftime('%Y-W%W', substr(started_at, 1, 10))", nil
+	default:
+		return "", errors.New("unsupported stat grain")
+	}
+}
+
+func validateStatsGrain(filter TokenStatsFilter, grain string) error {
+	if grain == "" || grain == "hour" {
+		return nil
+	}
+	if filter.From == "" || filter.To == "" {
+		return nil
+	}
+	from, err := time.Parse("2006-01-02", filter.From[:min(len(filter.From), len("2006-01-02"))])
+	if err != nil {
+		return err
+	}
+	to, err := time.Parse("2006-01-02", filter.To[:min(len(filter.To), len("2006-01-02"))])
+	if err != nil {
+		return err
+	}
+	days := int(to.Sub(from).Hours() / 24)
+	if grain == "day" && days < 1 {
+		return errors.New("day grain requires a range of at least 1 day")
+	}
+	if grain == "week" && days < 7 {
+		return errors.New("week grain requires a range of at least 7 days")
+	}
+	return nil
 }
 
 func validateProvider(in ProviderInput) error {
@@ -568,35 +942,88 @@ func validateModel(in ModelInput) error {
 	return nil
 }
 
+func validateAPIKeyInput(in APIKeyInput) error {
+	name := strings.TrimSpace(in.Name)
+	if name == "" {
+		return errors.New("api key name is required")
+	}
+	if name == NoAppName {
+		return errors.New("无应用 is a reserved api key name")
+	}
+	return nil
+}
+
 func (s *Store) ensureModelEnabledColumn() error {
-	rows, err := s.db.Query(`PRAGMA table_info(models)`)
+	has, err := s.hasColumn("models", "enabled")
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
-	for rows.Next() {
-		var cid int
-		var name, typ string
-		var notNull, pk int
-		var dflt any
-		if err := rows.Scan(&cid, &name, &typ, &notNull, &dflt, &pk); err != nil {
-			return err
-		}
-		if name == "enabled" {
-			return nil
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return err
+	if has {
+		return nil
 	}
 	_, err = s.db.Exec(`ALTER TABLE models ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1`)
 	return err
 }
 
 func (s *Store) ensureProviderCapabilityConfigColumn() error {
-	rows, err := s.db.Query(`PRAGMA table_info(providers)`)
+	has, err := s.hasColumn("providers", "capability_config")
 	if err != nil {
 		return err
+	}
+	if has {
+		return s.backfillProviderCapabilityConfig()
+	}
+	if _, err := s.db.Exec(`ALTER TABLE providers ADD COLUMN capability_config TEXT NOT NULL DEFAULT ''`); err != nil {
+		return err
+	}
+	return s.backfillProviderCapabilityConfig()
+}
+
+func (s *Store) ensureAPIKeyStatsSchema() error {
+	if _, err := s.db.Exec(`
+CREATE TABLE IF NOT EXISTS api_keys (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	name TEXT NOT NULL,
+	description TEXT NOT NULL DEFAULT '',
+	key TEXT NOT NULL UNIQUE,
+	deleted_at TEXT,
+	created_at TEXT NOT NULL,
+	updated_at TEXT NOT NULL
+);
+`); err != nil {
+		return err
+	}
+	for _, column := range []struct {
+		name string
+		sql  string
+	}{
+		{"app_name", `ALTER TABLE call_logs ADD COLUMN app_name TEXT NOT NULL DEFAULT '无应用'`},
+		{"is_stream", `ALTER TABLE call_logs ADD COLUMN is_stream INTEGER NOT NULL DEFAULT 0`},
+	} {
+		has, err := s.hasColumn("call_logs", column.name)
+		if err != nil {
+			return err
+		}
+		if !has {
+			if _, err := s.db.Exec(column.sql); err != nil {
+				return err
+			}
+		}
+	}
+	_, err := s.db.Exec(`
+CREATE INDEX IF NOT EXISTS idx_api_keys_key_active ON api_keys(key, deleted_at);
+CREATE INDEX IF NOT EXISTS idx_call_logs_app_name ON call_logs(app_name);
+`)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *Store) hasColumn(table, column string) (bool, error) {
+	rows, err := s.db.Query(`PRAGMA table_info(` + table + `)`)
+	if err != nil {
+		return false, err
 	}
 	defer rows.Close()
 	for rows.Next() {
@@ -605,19 +1032,13 @@ func (s *Store) ensureProviderCapabilityConfigColumn() error {
 		var notNull, pk int
 		var dflt any
 		if err := rows.Scan(&cid, &name, &typ, &notNull, &dflt, &pk); err != nil {
-			return err
+			return false, err
 		}
-		if name == "capability_config" {
-			return s.backfillProviderCapabilityConfig()
+		if name == column {
+			return true, nil
 		}
 	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	if _, err := s.db.Exec(`ALTER TABLE providers ADD COLUMN capability_config TEXT NOT NULL DEFAULT ''`); err != nil {
-		return err
-	}
-	return s.backfillProviderCapabilityConfig()
+	return false, rows.Err()
 }
 
 func (s *Store) backfillProviderCapabilityConfig() error {
@@ -665,6 +1086,28 @@ func nullable(value string) any {
 		return nil
 	}
 	return value
+}
+
+func generateAPIKey() (string, error) {
+	buf := make([]byte, 16)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	buf[6] = (buf[6] & 0x0f) | 0x40
+	buf[8] = (buf[8] & 0x3f) | 0x80
+	return "sk-" + hex.EncodeToString(buf), nil
+}
+
+func durationMs(startedAt, endedAt string) int64 {
+	start, err := time.Parse(time.RFC3339, startedAt)
+	if err != nil {
+		return 0
+	}
+	end, err := time.Parse(time.RFC3339, endedAt)
+	if err != nil {
+		return 0
+	}
+	return end.Sub(start).Milliseconds()
 }
 
 func (s *Store) encrypt(plain string) (string, error) {

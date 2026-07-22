@@ -3,6 +3,7 @@ package store
 import (
 	"database/sql"
 	"encoding/base64"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -238,6 +239,102 @@ func TestListEnabledModelsFiltersDisabled(t *testing.T) {
 	}
 }
 
+func TestAPIKeyCRUDAndAuthorizationResolution(t *testing.T) {
+	s := openTestStore(t)
+	defer s.Close()
+
+	if _, err := s.CreateAPIKey(APIKeyInput{Name: NoAppName}); err == nil {
+		t.Fatal("expected reserved name error")
+	}
+	if _, err := s.CreateAPIKey(APIKeyInput{}); err == nil {
+		t.Fatal("expected missing name error")
+	}
+	key, err := s.CreateAPIKey(APIKeyInput{Name: "Raycast", Description: "desktop launcher"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(key.Key, "sk-") || len(key.Key) != 35 {
+		t.Fatalf("generated key = %q", key.Key)
+	}
+	if key.Key[15] != '4' {
+		t.Fatalf("generated key is not uuid-v4 shaped: %q", key.Key)
+	}
+	if got := s.AppNameForAuthorization("Bearer " + key.Key); got != "Raycast" {
+		t.Fatalf("resolved app = %q", got)
+	}
+	for _, header := range []string{"", "Basic " + key.Key, "Bearer", "Bearer   "} {
+		if got := s.AppNameForAuthorization(header); got != NoAppName {
+			t.Fatalf("header %q resolved app = %q", header, got)
+		}
+	}
+	updated, err := s.UpdateAPIKey(APIKeyInput{ID: key.ID, Name: "Raycast Pro", Description: "updated"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Key != key.Key || updated.Name != "Raycast Pro" {
+		t.Fatalf("updated key = %#v", updated)
+	}
+	if err := s.DeleteAPIKey(key.ID); err != nil {
+		t.Fatal(err)
+	}
+	keys, err := s.ListAPIKeys()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(keys) != 0 || s.AppNameForAuthorization("Bearer "+key.Key) != NoAppName {
+		t.Fatalf("deleted keys=%#v resolved=%q", keys, s.AppNameForAuthorization("Bearer "+key.Key))
+	}
+	if _, err := s.UpdateAPIKey(APIKeyInput{ID: key.ID, Name: "Missing"}); err != sql.ErrNoRows {
+		t.Fatalf("missing update err = %v", err)
+	}
+	if err := s.DeleteAPIKey(key.ID); err != sql.ErrNoRows {
+		t.Fatalf("missing delete err = %v", err)
+	}
+}
+
+func TestCreateAPIKeyRetriesUniqueCollisions(t *testing.T) {
+	s := openTestStore(t)
+	defer s.Close()
+
+	old := newAPIKey
+	defer func() { newAPIKey = old }()
+	newAPIKey = func() (string, error) { return "sk-00000000000040008000000000000000", nil }
+	if _, err := s.CreateAPIKey(APIKeyInput{Name: "One"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CreateAPIKey(APIKeyInput{Name: "Two"}); err == nil || !strings.Contains(err.Error(), "collided") {
+		t.Fatalf("collision err = %v", err)
+	}
+	newAPIKey = func() (string, error) { return "", errors.New("random failed") }
+	if _, err := s.CreateAPIKey(APIKeyInput{Name: "Three"}); err == nil || !strings.Contains(err.Error(), "random failed") {
+		t.Fatalf("generator err = %v", err)
+	}
+}
+
+func TestListAPIKeysScanError(t *testing.T) {
+	s := openTestStore(t)
+	defer s.Close()
+
+	if _, err := s.db.Exec(`
+DROP TABLE api_keys;
+CREATE TABLE api_keys (
+	id TEXT,
+	name TEXT,
+	description TEXT,
+	key TEXT,
+	deleted_at TEXT,
+	created_at TEXT,
+	updated_at TEXT
+);
+INSERT INTO api_keys(id, name, description, key, created_at, updated_at)
+VALUES ('bad-id', 'Bad', '', 'sk-bad', 'now', 'now');`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ListAPIKeys(); err == nil {
+		t.Fatal("expected ListAPIKeys scan error")
+	}
+}
+
 func TestCallLogTokenStats(t *testing.T) {
 	s := openTestStore(t)
 	defer s.Close()
@@ -246,8 +343,8 @@ func TestCallLogTokenStats(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, log := range []CallLog{
-		{ProviderID: "p1", ModelID: "m1", Protocol: "openai_chat", StartedAt: "2026-07-20T01:00:00Z", StatusCode: 200, InputTokens: 10, OutputTokens: 3, CacheReadInputTokens: 2},
-		{ProviderID: "p1", ModelID: "m2", Protocol: "openai_chat", StartedAt: "2026-07-21T01:00:00Z", StatusCode: 200, InputTokens: 5, OutputTokens: 7, CacheCreationInputTokens: 1},
+		{ProviderID: "p1", ModelID: "m1", AppName: "Raycast", Protocol: "openai_chat", StartedAt: "2026-07-20T01:00:00Z", EndedAt: "2026-07-20T01:00:01Z", StatusCode: 200, InputTokens: 10, OutputTokens: 3, CacheReadInputTokens: 2, Stream: true},
+		{ProviderID: "p1", ModelID: "m2", AppName: "Cursor", Protocol: "openai_chat", StartedAt: "2026-07-21T01:00:00Z", StatusCode: 200, InputTokens: 5, OutputTokens: 7, CacheCreationInputTokens: 1},
 		{Protocol: "openai_chat", StartedAt: "2026-07-19T01:00:00Z", InputTokens: 1},
 	} {
 		if err := s.CreateCallLog(log); err != nil {
@@ -290,6 +387,97 @@ func TestCallLogTokenStats(t *testing.T) {
 	}
 	if len(models) != 1 || models[0] != "m2" {
 		t.Fatalf("date logged models = %#v", models)
+	}
+
+	stats, err = s.TokenStats(TokenStatsFilter{AppName: "Raycast"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Calls != 1 || stats.InputTokens != 10 {
+		t.Fatalf("app stats = %#v", stats)
+	}
+	apps, err := s.TokenStatApps(TokenStatsFilter{ProviderID: "p1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(apps, ",") != "Cursor,Raycast" {
+		t.Fatalf("apps = %#v", apps)
+	}
+	rows, err := s.TokenStatRows(TokenStatsFilter{ProviderID: "p1"}, "app")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 || rows[0].Name != "Raycast" || rows[0].TotalTokens != 13 {
+		t.Fatalf("rows = %#v", rows)
+	}
+	trend, err := s.TokenTrend(TokenStatsFilter{ProviderID: "p1"}, "day", "app")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(trend) != 2 || trend[0].Bucket != "2026-07-20" || trend[0].Name != "Raycast" {
+		t.Fatalf("trend = %#v", trend)
+	}
+	page, err := s.CallLogs(TokenStatsFilter{ProviderID: "p1"}, 1, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if page.Total != 2 || page.Items[1].DurationMs != 1000 || !page.Items[1].Stream {
+		t.Fatalf("log page = %#v", page)
+	}
+	for i := 0; i < 58; i++ {
+		if err := s.CreateCallLog(CallLog{ProviderID: "p1", ModelID: "m1", Protocol: "openai_chat", StartedAt: "2026-07-22T01:00:00Z"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	page, err = s.CallLogs(TokenStatsFilter{ProviderID: "p1"}, -1, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if page.Total != 60 || len(page.Items) != 50 {
+		t.Fatalf("default page = %#v", page)
+	}
+	page, err = s.CallLogs(TokenStatsFilter{ProviderID: "p1"}, 1, 10001)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Items) != 50 {
+		t.Fatalf("clamped page size items = %d", len(page.Items))
+	}
+	if _, err := s.TokenStatRows(TokenStatsFilter{}, "bad"); err == nil {
+		t.Fatal("expected unsupported group error")
+	}
+	if _, err := s.TokenTrend(TokenStatsFilter{}, "bad", "app"); err == nil {
+		t.Fatal("expected unsupported grain error")
+	}
+	if _, err := s.TokenTrend(TokenStatsFilter{}, "day", "bad"); err == nil {
+		t.Fatal("expected unsupported trend group error")
+	}
+	if _, err := s.TokenTrend(TokenStatsFilter{From: "2026-07-22", To: "2026-07-22"}, "day", "app"); err == nil {
+		t.Fatal("expected day grain range error")
+	}
+	if _, err := s.TokenTrend(TokenStatsFilter{From: "2026-07-01", To: "2026-07-06"}, "week", "app"); err == nil {
+		t.Fatal("expected week grain range error")
+	}
+}
+
+func TestStatHelperBranches(t *testing.T) {
+	for _, group := range []string{"", "provider", "model", "app"} {
+		if column, fallback, err := statGroupColumn(group); err != nil || column == "" || fallback == "" {
+			t.Fatalf("statGroupColumn(%q) = %q/%q/%v", group, column, fallback, err)
+		}
+	}
+	for _, grain := range []string{"", "day", "hour", "week"} {
+		if expr, err := statBucketExpr(grain); err != nil || expr == "" {
+			t.Fatalf("statBucketExpr(%q) = %q/%v", grain, expr, err)
+		}
+	}
+	for _, filter := range []TokenStatsFilter{
+		{From: "bad", To: "2026-07-02"},
+		{From: "2026-07-01", To: "bad"},
+	} {
+		if err := validateStatsGrain(filter, "day"); err == nil {
+			t.Fatalf("expected date parse error for %#v", filter)
+		}
 	}
 }
 
@@ -423,11 +611,35 @@ func TestOpenAndClosedStoreErrors(t *testing.T) {
 	if _, err := s.ListEnabledModels(); err == nil {
 		t.Fatal("expected ListEnabledModels error")
 	}
+	if _, err := s.ListAPIKeys(); err == nil {
+		t.Fatal("expected ListAPIKeys error")
+	}
+	if _, err := s.CreateAPIKey(APIKeyInput{Name: "App"}); err == nil {
+		t.Fatal("expected CreateAPIKey error")
+	}
+	if _, err := s.UpdateAPIKey(APIKeyInput{ID: 1, Name: "App"}); err == nil {
+		t.Fatal("expected UpdateAPIKey error")
+	}
+	if err := s.DeleteAPIKey(1); err == nil {
+		t.Fatal("expected DeleteAPIKey error")
+	}
 	if err := s.CreateCallLog(CallLog{Protocol: "openai_chat"}); err == nil {
 		t.Fatal("expected CreateCallLog error")
 	}
 	if _, err := s.TokenStats(TokenStatsFilter{}); err == nil {
 		t.Fatal("expected TokenStats error")
+	}
+	if _, err := s.TokenStatApps(TokenStatsFilter{}); err == nil {
+		t.Fatal("expected TokenStatApps error")
+	}
+	if _, err := s.TokenStatRows(TokenStatsFilter{}, "app"); err == nil {
+		t.Fatal("expected TokenStatRows error")
+	}
+	if _, err := s.TokenTrend(TokenStatsFilter{}, "day", "app"); err == nil {
+		t.Fatal("expected TokenTrend error")
+	}
+	if _, err := s.CallLogs(TokenStatsFilter{}, 1, 50); err == nil {
+		t.Fatal("expected CallLogs error")
 	}
 }
 
@@ -688,6 +900,56 @@ VALUES ('deepseek', 'DeepSeek', 'deepseek', 'https://api.deepseek.com', 'now', '
 	}
 	if !strings.Contains(capabilityConfig, "reasoning_content") {
 		t.Fatalf("backfilled capability config = %q", capabilityConfig)
+	}
+}
+
+func TestMigrationAddsAPIKeyStatsColumnsBeforeIndexes(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "localrelay.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`
+CREATE TABLE schema_migrations (
+	version INTEGER PRIMARY KEY,
+	applied_at TEXT NOT NULL
+);
+INSERT INTO schema_migrations(version, applied_at) VALUES (1, 'now');
+CREATE TABLE call_logs (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	provider_id TEXT,
+	model_id TEXT,
+	protocol TEXT NOT NULL,
+	started_at TEXT NOT NULL,
+	ended_at TEXT,
+	status_code INTEGER,
+	error TEXT,
+	input_tokens INTEGER NOT NULL DEFAULT 0,
+	output_tokens INTEGER NOT NULL DEFAULT 0,
+	cache_creation_input_tokens INTEGER NOT NULL DEFAULT 0,
+	cache_read_input_tokens INTEGER NOT NULL DEFAULT 0,
+	created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+INSERT INTO call_logs(model_id, protocol, started_at, input_tokens)
+VALUES ('m1', 'openai_chat', '2026-07-22T01:00:00Z', 3);`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	page, err := s.CallLogs(TokenStatsFilter{}, 1, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if page.Total != 1 || page.Items[0].AppName != NoAppName {
+		t.Fatalf("migrated logs = %#v", page)
 	}
 }
 

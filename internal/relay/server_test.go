@@ -50,15 +50,25 @@ func TestChatCompletionRelayAndLogs(t *testing.T) {
 	if _, err := s.CreateModel(store.ModelInput{ID: "gpt-test", ProviderID: "p1", Name: "GPT Test"}); err != nil {
 		t.Fatal(err)
 	}
+	apiKey, err := s.CreateAPIKey(store.APIKeyInput{Name: "Raycast"})
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	relay := New(s)
 	defer relay.Close()
 	server := httptest.NewServer(relay)
 	defer server.Close()
-	resp, err := http.Post(server.URL+"/v1/chat/completions", "application/json", bytes.NewBufferString(`{
+	req, err := http.NewRequest(http.MethodPost, server.URL+"/v1/chat/completions", bytes.NewBufferString(`{
 		"model":"p1/gpt-test",
 		"messages":[{"role":"user","content":"ping"}]
 	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+apiKey.Key)
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,7 +97,7 @@ func TestChatCompletionRelayAndLogs(t *testing.T) {
 
 	var stats store.TokenStats
 	for i := 0; i < 20; i++ {
-		stats, err = s.TokenStats(store.TokenStatsFilter{ProviderID: "p1", ModelID: "gpt-test"})
+		stats, err = s.TokenStats(store.TokenStatsFilter{ProviderID: "p1", ModelID: "gpt-test", AppName: "Raycast"})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -703,6 +713,22 @@ func TestHelperBranches(t *testing.T) {
 		t.Fatal(err)
 	}
 	if stats.Calls != 1 {
+		t.Fatalf("stats = %#v", stats)
+	}
+}
+
+func TestQueueLogAfterCloseFallsBackToDirectWrite(t *testing.T) {
+	s := openRelayStore(t)
+	defer s.Close()
+	relay := New(s)
+	relay.Close()
+
+	relay.queueLog(store.CallLog{Protocol: "openai_chat", StartedAt: "2026-07-22T00:00:00Z", InputTokens: 2})
+	stats, err := s.TokenStats(store.TokenStatsFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Calls != 1 || stats.InputTokens != 2 {
 		t.Fatalf("stats = %#v", stats)
 	}
 }

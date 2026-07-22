@@ -102,12 +102,44 @@ func (a *App) DeleteModel(providerID string, id string) error {
 	return a.store.DeleteModel(providerID, id)
 }
 
+func (a *App) ListAPIKeys() ([]store.APIKey, error) {
+	return a.store.ListAPIKeys()
+}
+
+func (a *App) CreateAPIKey(input store.APIKeyInput) (store.APIKey, error) {
+	return a.store.CreateAPIKey(input)
+}
+
+func (a *App) UpdateAPIKey(input store.APIKeyInput) (store.APIKey, error) {
+	return a.store.UpdateAPIKey(input)
+}
+
+func (a *App) DeleteAPIKey(id int64) error {
+	return a.store.DeleteAPIKey(id)
+}
+
 func (a *App) TokenStats(filter store.TokenStatsFilter) (store.TokenStats, error) {
 	return a.store.TokenStats(filter)
 }
 
 func (a *App) TokenStatModels(filter store.TokenStatsFilter) ([]string, error) {
 	return a.store.TokenStatModels(filter)
+}
+
+func (a *App) TokenStatApps(filter store.TokenStatsFilter) ([]string, error) {
+	return a.store.TokenStatApps(filter)
+}
+
+func (a *App) TokenStatRows(filter store.TokenStatsFilter, groupBy string) ([]store.TokenStatRow, error) {
+	return a.store.TokenStatRows(filter, groupBy)
+}
+
+func (a *App) TokenTrend(filter store.TokenStatsFilter, grain string, groupBy string) ([]store.TokenTrendPoint, error) {
+	return a.store.TokenTrend(filter, grain, groupBy)
+}
+
+func (a *App) CallLogs(filter store.TokenStatsFilter, page int, pageSize int) (store.CallLogPage, error) {
+	return a.store.CallLogs(filter, page, pageSize)
 }
 
 type ProviderTestResult struct {

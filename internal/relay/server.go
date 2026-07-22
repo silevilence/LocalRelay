@@ -25,6 +25,8 @@ type Server struct {
 	client  *http.Client
 	logs    chan store.CallLog
 	logDone chan struct{}
+	logMu   sync.RWMutex
+	closed  bool
 	once    sync.Once
 }
 
@@ -41,7 +43,10 @@ func New(s *store.Store) *Server {
 
 func (s *Server) Close() {
 	s.once.Do(func() {
+		s.logMu.Lock()
+		s.closed = true
 		close(s.logs)
+		s.logMu.Unlock()
 		<-s.logDone
 	})
 }
@@ -78,7 +83,7 @@ func (s *Server) handleModels(w http.ResponseWriter) {
 
 func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	start := time.Now().UTC()
-	log := store.CallLog{Protocol: "openai_chat", StartedAt: start.Format(time.RFC3339)}
+	log := store.CallLog{Protocol: "openai_chat", AppName: s.store.AppNameForAuthorization(r.Header.Get("Authorization")), StartedAt: start.Format(time.RFC3339)}
 	status := http.StatusOK
 	defer func() {
 		log.EndedAt = time.Now().UTC().Format(time.RFC3339)
@@ -100,6 +105,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		writeError(w, status, "bad_request", err.Error())
 		return
 	}
+	log.Stream = clientReq.Stream
 	routed, err := s.store.GetRoutedModel(clientReq.Model)
 	if err != nil {
 		status = routeStatus(err)
@@ -241,6 +247,12 @@ func (s *Server) streamProviderResponse(ctx context.Context, w http.ResponseWrit
 }
 
 func (s *Server) queueLog(log store.CallLog) {
+	s.logMu.RLock()
+	defer s.logMu.RUnlock()
+	if s.closed {
+		_ = s.store.CreateCallLog(log)
+		return
+	}
 	select {
 	case s.logs <- log:
 	default:

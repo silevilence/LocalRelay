@@ -3,15 +3,23 @@
 import {store} from '../models';
 import {main} from '../models';
 
+export function CallLogs(arg1:store.TokenStatsFilter,arg2:number,arg3:number):Promise<store.CallLogPage>;
+
+export function CreateAPIKey(arg1:store.APIKeyInput):Promise<store.APIKey>;
+
 export function CreateModel(arg1:store.ModelInput):Promise<store.Model>;
 
 export function CreateProvider(arg1:store.ProviderInput):Promise<store.Provider>;
+
+export function DeleteAPIKey(arg1:number):Promise<void>;
 
 export function DeleteModel(arg1:string,arg2:string):Promise<void>;
 
 export function DeleteProvider(arg1:string):Promise<void>;
 
 export function Greet(arg1:string):Promise<string>;
+
+export function ListAPIKeys():Promise<Array<store.APIKey>>;
 
 export function ListModels(arg1:string):Promise<Array<store.Model>>;
 
@@ -23,9 +31,17 @@ export function RelayBaseURL():Promise<string>;
 
 export function TestProviderModel(arg1:string,arg2:string):Promise<main.ProviderTestResult>;
 
+export function TokenStatApps(arg1:store.TokenStatsFilter):Promise<Array<string>>;
+
 export function TokenStatModels(arg1:store.TokenStatsFilter):Promise<Array<string>>;
 
+export function TokenStatRows(arg1:store.TokenStatsFilter,arg2:string):Promise<Array<store.TokenStatRow>>;
+
 export function TokenStats(arg1:store.TokenStatsFilter):Promise<store.TokenStats>;
+
+export function TokenTrend(arg1:store.TokenStatsFilter,arg2:string,arg3:string):Promise<Array<store.TokenTrendPoint>>;
+
+export function UpdateAPIKey(arg1:store.APIKeyInput):Promise<store.APIKey>;
 
 export function UpdateModel(arg1:store.ModelInput):Promise<store.Model>;
 

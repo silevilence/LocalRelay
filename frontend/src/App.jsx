@@ -1,22 +1,32 @@
-import {useEffect, useMemo, useState} from 'react';
+import {useEffect, useMemo, useRef, useState} from 'react';
+import * as echarts from 'echarts';
 import {
+    CallLogs,
+    CreateAPIKey,
     CreateModel,
     CreateProvider,
+    DeleteAPIKey,
     DeleteModel,
     DeleteProvider,
+    ListAPIKeys,
     ListModels,
     ListProviderPresets,
     ListProviders,
     RelayBaseURL,
+    TokenStatApps,
     TokenStatModels,
+    TokenStatRows,
     TokenStats,
+    TokenTrend,
     TestProviderModel,
+    UpdateAPIKey,
     UpdateModel,
     UpdateProvider,
 } from "../wailsjs/go/main/App";
 
 const emptyProvider = {id: "", name: "", type: "openai", baseUrl: "", apiKey: "", capabilityConfig: ""};
 const emptyModel = {id: "", providerId: "", name: "", capabilities: "", contextLength: 0, maxTokens: 0, enabled: true};
+const emptyApiKey = {id: 0, name: "", description: ""};
 const thinkingRequestFieldOptions = ["thinking", "enable_thinking", "thinking_budget"];
 const reasoningValueOptions = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
 const reasoningMapSources = ["none", "minimal", "low", "medium", "high", "xhigh"];
@@ -25,6 +35,11 @@ function App() {
     const [providers, setProviders] = useState([]);
     const [providerPresets, setProviderPresets] = useState([]);
     const [models, setModels] = useState([]);
+    const [apiKeys, setApiKeys] = useState([]);
+    const [apiKeyDraft, setApiKeyDraft] = useState(emptyApiKey);
+    const [editingApiKey, setEditingApiKey] = useState(false);
+    const [showApiKeyForm, setShowApiKeyForm] = useState(false);
+    const [visibleApiKeys, setVisibleApiKeys] = useState({});
     const [selectedProviderId, setSelectedProviderId] = useState("");
     const [selectedPresetId, setSelectedPresetId] = useState("");
     const [providerDraft, setProviderDraft] = useState(emptyProvider);
@@ -44,9 +59,19 @@ function App() {
     const [message, setMessage] = useState("正在加载本地配置…");
     const [toast, setToast] = useState("");
     const [relayBaseUrl, setRelayBaseUrl] = useState("");
-    const [statsFilter, setStatsFilter] = useState({from: daysAgo(7), to: today(), providerId: "", modelId: ""});
+    const [statsFilter, setStatsFilter] = useState({from: daysAgo(7), to: today(), providerId: "", modelId: "", appName: ""});
     const [statsModelOptions, setStatsModelOptions] = useState([]);
+    const [statsAppOptions, setStatsAppOptions] = useState([]);
     const [stats, setStats] = useState({points: [], calls: 0, inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0});
+    const [statRows, setStatRows] = useState({provider: [], model: [], app: []});
+    const [trendRows, setTrendRows] = useState([]);
+    const [logPage, setLogPage] = useState({items: [], total: 0});
+    const [logPageNum, setLogPageNum] = useState(1);
+    const [statsTable, setStatsTable] = useState("logs");
+    const [statsChart, setStatsChart] = useState("appPie");
+    const [statsGrain, setStatsGrain] = useState("day");
+    const [statsStackBy, setStatsStackBy] = useState("app");
+    const [statsMetric, setStatsMetric] = useState("total");
 
     const selectedProvider = useMemo(
         () => providers.find((provider) => provider.id === selectedProviderId),
@@ -85,17 +110,19 @@ function App() {
 
     useEffect(() => {
         refreshProviders();
+        refreshAPIKeys();
         ListProviderPresets().then((items) => setProviderPresets(items || [])).catch(() => {});
         RelayBaseURL().then(setRelayBaseUrl).catch(() => {});
     }, []);
 
     useEffect(() => {
         refreshStats();
-    }, [statsFilter]);
+    }, [statsFilter, statsGrain, statsStackBy, logPageNum]);
 
     useEffect(() => {
         refreshStatsModelOptions();
-    }, [statsFilter.from, statsFilter.to, statsFilter.providerId]);
+        refreshStatsAppOptions();
+    }, [statsFilter.from, statsFilter.to, statsFilter.providerId, statsFilter.modelId]);
 
     useEffect(() => {
         if (selectedProvider) {
@@ -125,6 +152,54 @@ function App() {
             setModels((await ListModels(providerId || "")) || []);
         } catch (error) {
             setMessage(`加载模型失败：${error}`);
+        }
+    }
+
+    async function refreshAPIKeys() {
+        try {
+            setApiKeys((await ListAPIKeys()) || []);
+        } catch (error) {
+            setMessage(`加载 API Key 失败：${error}`);
+        }
+    }
+
+    async function saveAPIKey(event) {
+        event.preventDefault();
+        if (!apiKeyDraft.name.trim()) {
+            setMessage("应用名称必填。");
+            return;
+        }
+        try {
+            editingApiKey ? await UpdateAPIKey(apiKeyDraft) : await CreateAPIKey(apiKeyDraft);
+            await refreshAPIKeys();
+            setApiKeyDraft(emptyApiKey);
+            setEditingApiKey(false);
+            setShowApiKeyForm(false);
+            const success = editingApiKey ? "API Key 已更新。" : "API Key 已生成。";
+            setMessage(success);
+            notify(success);
+        } catch (error) {
+            setMessage(`保存 API Key 失败：${error}`);
+        }
+    }
+
+    async function removeAPIKey(item) {
+        if (!confirm(`删除应用「${item.name}」的 API Key？历史日志会保留应用名称。`)) return;
+        try {
+            await DeleteAPIKey(item.id);
+            await refreshAPIKeys();
+            setMessage("API Key 已删除。");
+        } catch (error) {
+            setMessage(`删除 API Key 失败：${error}`);
+        }
+    }
+
+    async function copyText(text) {
+        try {
+            await navigator.clipboard.writeText(text);
+            notify("已复制");
+        } catch {
+            setMessage("复制失败，请手动选择文本复制。");
         }
     }
 
@@ -292,14 +367,20 @@ function App() {
     }
 
     async function refreshStats() {
+        const filter = statsFilterPayload(statsFilter);
         try {
-            const result = await TokenStats({
-                from: statsFilter.from ? `${statsFilter.from}T00:00:00Z` : "",
-                to: statsFilter.to ? `${statsFilter.to}T23:59:59Z` : "",
-                providerId: statsFilter.providerId,
-                modelId: statsFilter.modelId,
-            });
-            setStats(result || {points: []});
+            const [summary, providersRows, modelsRows, appsRows, trend, logs] = await Promise.all([
+                TokenStats(filter),
+                TokenStatRows(filter, "provider"),
+                TokenStatRows(filter, "model"),
+                TokenStatRows(filter, "app"),
+                TokenTrend(filter, statsGrain, statsStackBy),
+                CallLogs(filter, logPageNum, 50),
+            ]);
+            setStats(summary || {points: []});
+            setStatRows({provider: providersRows || [], model: modelsRows || [], app: appsRows || []});
+            setTrendRows(trend || []);
+            setLogPage(logs || {items: [], total: 0});
         } catch (error) {
             setMessage(`加载统计失败：${error}`);
         }
@@ -307,17 +388,23 @@ function App() {
 
     async function refreshStatsModelOptions() {
         try {
-            const options = await TokenStatModels({
-                from: statsFilter.from ? `${statsFilter.from}T00:00:00Z` : "",
-                to: statsFilter.to ? `${statsFilter.to}T23:59:59Z` : "",
-                providerId: statsFilter.providerId,
-                modelId: "",
-            });
+            const options = await TokenStatModels({...statsFilterPayload(statsFilter), modelId: ""});
             const items = options || [];
             setStatsModelOptions(items);
             setStatsFilter((current) => current.modelId && !items.includes(current.modelId) ? {...current, modelId: ""} : current);
         } catch (error) {
             setMessage(`加载模型筛选项失败：${error}`);
+        }
+    }
+
+    async function refreshStatsAppOptions() {
+        try {
+            const options = await TokenStatApps({...statsFilterPayload(statsFilter), appName: ""});
+            const items = options || [];
+            setStatsAppOptions(items);
+            setStatsFilter((current) => current.appName && !items.includes(current.appName) ? {...current, appName: ""} : current);
+        } catch (error) {
+            setMessage(`加载应用筛选项失败：${error}`);
         }
     }
 
@@ -331,22 +418,80 @@ function App() {
                     <h1 className="text-lg font-bold">LocalRelay</h1>
                     <p className="text-xs text-zinc-500">本地模型网关配置</p>
                 </div>
-                <div className="grid w-72 grid-cols-2 gap-2">
+                <div className="grid w-[26rem] grid-cols-3 gap-2">
                     <NavButton active={page === "providers"} onClick={() => setPage("providers")}>配置</NavButton>
+                    <NavButton active={page === "apikeys"} onClick={() => setPage("apikeys")}>API Key</NavButton>
                     <NavButton active={page === "stats"} onClick={() => setPage("stats")}>Token 统计</NavButton>
                 </div>
             </header>
 
-            {page === "stats" ? (
+            {page === "apikeys" ? (
+                <main className="min-h-0 flex-1 overflow-y-auto px-7 py-5">
+                    <div className="mx-auto max-w-7xl">
+                        <APIKeyPanel
+                            items={apiKeys}
+                            draft={apiKeyDraft}
+                            editing={editingApiKey}
+                            showForm={showApiKeyForm}
+                            visibleKeys={visibleApiKeys}
+                            onNew={() => {
+                                setApiKeyDraft(emptyApiKey);
+                                setEditingApiKey(false);
+                                setShowApiKeyForm(true);
+                            }}
+                            onEdit={(item) => {
+                                setApiKeyDraft({id: item.id, name: item.name, description: item.description || ""});
+                                setEditingApiKey(true);
+                                setShowApiKeyForm(true);
+                            }}
+                            onDelete={removeAPIKey}
+                            onCopy={copyText}
+                            onToggleVisible={(id) => setVisibleApiKeys((current) => ({...current, [id]: !current[id]}))}
+                        />
+                        <StatusMessage message={message} providerCount={providerCount} />
+                    </div>
+                </main>
+            ) : page === "stats" ? (
                 <main className="min-h-0 flex-1 overflow-y-auto px-7 py-5">
                     <div className="mx-auto max-w-7xl">
                         <StatsPanel
                             baseUrl={relayBaseUrl}
                             stats={stats}
+                            statRows={statRows}
+                            trendRows={trendRows}
+                            logPage={logPage}
+                            logPageNum={logPageNum}
+                            table={statsTable}
+                            chart={statsChart}
+                            grain={statsGrain}
+                            stackBy={statsStackBy}
+                            metric={statsMetric}
                             filter={statsFilter}
                             providers={providers}
                             modelOptions={statsModelOptions}
-                            onChange={(patch) => setStatsFilter({...statsFilter, ...patch})}
+                            appOptions={statsAppOptions}
+                            onChange={(patch) => {
+                                const nextFilter = {...statsFilter, ...patch};
+                                const nextGrain = coerceGrain(nextFilter, statsGrain);
+                                if (nextGrain !== statsGrain) {
+                                    setStatsGrain(nextGrain);
+                                    setMessage(nextGrain === "hour" ? "时间范围不足，已切换为按小时统计。" : "时间范围不足，已切换为按天统计。");
+                                }
+                                setLogPageNum(1);
+                                setStatsFilter(nextFilter);
+                            }}
+                            onTable={setStatsTable}
+                            onChart={setStatsChart}
+                            onGrain={(grain) => {
+                                if (!grainAllowed(statsFilter, grain)) {
+                                    setMessage(grain === "week" ? "按周统计要求时间范围至少 7 天。" : "按天统计要求时间范围至少 1 天。");
+                                    return;
+                                }
+                                setStatsGrain(grain);
+                            }}
+                            onStackBy={setStatsStackBy}
+                            onMetric={setStatsMetric}
+                            onPage={setLogPageNum}
                             onRefresh={refreshStats}
                         />
                         <StatusMessage message={message} providerCount={providerCount} />
@@ -504,6 +649,17 @@ function App() {
                         testing={isTestingProvider}
                         onModelChange={setTestModelId}
                         onRun={runProviderTest}
+                    />
+                </Modal>
+            )}
+            {showApiKeyForm && (
+                <Modal title={editingApiKey ? "编辑 API Key" : "新增 API Key"} onClose={() => setShowApiKeyForm(false)}>
+                    <APIKeyForm
+                        draft={apiKeyDraft}
+                        editing={editingApiKey}
+                        onChange={(patch) => setApiKeyDraft({...apiKeyDraft, ...patch})}
+                        onSubmit={saveAPIKey}
+                        onCancel={() => setShowApiKeyForm(false)}
                     />
                 </Modal>
             )}
@@ -754,12 +910,78 @@ function ModelGroup({family, models, onEdit, onDelete}) {
                 ))}
             </div>
         </div>
-    );
+	);
 }
 
-function StatsPanel({baseUrl, stats, filter, providers, modelOptions, onChange, onRefresh}) {
+function APIKeyPanel({items, visibleKeys, onNew, onEdit, onDelete, onCopy, onToggleVisible}) {
+	return (
+		<section className="mt-7 rounded-2xl border border-zinc-800 bg-zinc-950/30 p-5">
+			<div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+				<div>
+					<h2 className="text-xl font-bold">API Key 管理</h2>
+					<p className="mt-1 text-sm text-zinc-500">只用于应用统计口径；请求不会因为 key 无效被拒绝。</p>
+				</div>
+				<button className="rounded-xl bg-zinc-100 px-4 py-2.5 font-bold text-zinc-950" type="button" onClick={onNew}>＋ 新增</button>
+			</div>
+			<div className="overflow-hidden rounded-xl border border-zinc-800">
+				<table className="w-full min-w-[760px] text-left text-sm">
+					<thead className="bg-zinc-900/70 text-xs text-zinc-500">
+						<tr>
+							<th className="px-4 py-3">应用名称</th>
+							<th className="px-4 py-3">描述</th>
+							<th className="px-4 py-3">Key</th>
+							<th className="px-4 py-3 text-right">操作</th>
+						</tr>
+					</thead>
+					<tbody className="divide-y divide-zinc-800">
+						{items.map((item) => {
+							const visible = visibleKeys[item.id];
+							return (
+								<tr key={item.id}>
+									<td className="px-4 py-3 font-semibold text-zinc-100">{item.name}</td>
+									<td className="px-4 py-3 text-zinc-400">{item.description || "—"}</td>
+									<td className="px-4 py-3 font-mono text-xs text-zinc-300">{visible ? item.key : maskKey(item.key)}</td>
+									<td className="px-4 py-3">
+										<div className="flex justify-end gap-2">
+											<button className="rounded-lg border border-zinc-700 px-3 py-1.5 text-zinc-300 hover:bg-zinc-900" type="button" onClick={() => onCopy(item.key)}>复制</button>
+											<button className="rounded-lg border border-zinc-700 px-3 py-1.5 text-zinc-300 hover:bg-zinc-900" type="button" onClick={() => onToggleVisible(item.id)}>{visible ? "隐藏" : "显示"}</button>
+											<button className="rounded-lg border border-zinc-700 px-3 py-1.5 text-zinc-300 hover:bg-zinc-900" type="button" onClick={() => onEdit(item)}>编辑</button>
+											<button className="rounded-lg border border-red-900/70 px-3 py-1.5 text-red-300 hover:bg-red-950/40" type="button" onClick={() => onDelete(item)}>删除</button>
+										</div>
+									</td>
+								</tr>
+							);
+						})}
+						{!items.length && (
+							<tr>
+								<td className="px-4 py-8 text-center text-zinc-500" colSpan="4">暂无 API Key。点右上角新增一个应用。</td>
+							</tr>
+						)}
+					</tbody>
+				</table>
+			</div>
+		</section>
+	);
+}
+
+function APIKeyForm({draft, editing, onChange, onSubmit, onCancel}) {
+	return (
+		<form className="space-y-4" onSubmit={onSubmit}>
+			<Field label="应用名称" value={draft.name} onChange={(name) => onChange({name})} placeholder="例如 Raycast / Cursor" />
+			<Field label="描述" value={draft.description || ""} onChange={(description) => onChange({description})} placeholder="可选，用来备注来源" />
+			<p className="text-sm text-zinc-500">{editing ? "Key 本身不会被修改。" : "保存后自动生成 sk- 开头的 32 位 key。"}</p>
+			<div className="flex justify-end gap-2">
+				<button className="rounded-xl border border-zinc-700 px-4 py-2.5 font-semibold text-zinc-300" type="button" onClick={onCancel}>取消</button>
+				<button className="rounded-xl bg-zinc-100 px-4 py-2.5 font-bold text-zinc-950" type="submit">保存</button>
+			</div>
+		</form>
+	);
+}
+
+function StatsPanel({baseUrl, stats, statRows, trendRows, logPage, logPageNum, table, chart, grain, stackBy, metric, filter, providers, modelOptions, appOptions, onChange, onTable, onChart, onGrain, onStackBy, onMetric, onPage, onRefresh}) {
     const points = stats.points || [];
     const nonCacheInputTokens = nonCacheInput(stats);
+    const maxPage = Math.max(1, Math.ceil((logPage.total || 0) / 50));
     return (
         <section className="mt-7 rounded-2xl border border-zinc-800 bg-zinc-950/30 p-5">
             <div className="mb-4 flex flex-wrap items-end justify-between gap-3">
@@ -783,6 +1005,12 @@ function StatsPanel({baseUrl, stats, filter, providers, modelOptions, onChange, 
                         onChange={(modelId) => onChange({modelId})}
                         options={[["", modelOptions.length ? "全部" : "暂无记录"], ...modelOptions.map((model) => [model, model])]}
                     />
+                    <SelectField
+                        label="应用"
+                        value={filter.appName}
+                        onChange={(appName) => onChange({appName})}
+                        options={[["", appOptions.length ? "全部" : "暂无记录"], ...appOptions.map((app) => [app, app])]}
+                    />
                     <button className="rounded-xl bg-zinc-100 px-4 py-2.5 font-bold text-zinc-950" type="button" onClick={onRefresh}>刷新</button>
                 </div>
             </div>
@@ -802,46 +1030,226 @@ function StatsPanel({baseUrl, stats, filter, providers, modelOptions, onChange, 
                 <Legend color="bg-violet-500" label="缓存命中" />
             </div>
 
-            <div className="mt-4 overflow-hidden rounded-xl border border-zinc-800">
-                {points.length > 0 && <TokenTrendChart points={points} />}
-                {!points.length && <div className="px-4 py-8 text-center text-zinc-500">暂无调用日志。</div>}
+            <div className="mt-6 rounded-xl border border-zinc-800 bg-[#151515] p-4">
+                <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+                    <div className="flex flex-wrap gap-2">
+                        <TabButton active={chart === "appPie"} onClick={() => onChart("appPie")}>应用饼图</TabButton>
+                        <TabButton active={chart === "modelPie"} onClick={() => onChart("modelPie")}>模型饼图</TabButton>
+                        <TabButton active={chart === "providerPie"} onClick={() => onChart("providerPie")}>平台饼图</TabButton>
+                        <TabButton active={chart === "bar"} onClick={() => onChart("bar")}>时间柱图</TabButton>
+                        <TabButton active={chart === "line"} onClick={() => onChart("line")}>趋势折线</TabButton>
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                        {(chart === "bar" || chart === "line") && (
+                            <>
+                                <SelectField label="粒度" value={grain} onChange={onGrain} options={[["hour", "小时"], ["day", "天"], ["week", "周"]]} />
+                                <SelectField label="分组" value={stackBy} onChange={onStackBy} options={[["app", "应用"], ["model", "模型"], ["provider", "平台"]]} />
+                                {chart === "line" && <SelectField label="指标" value={metric} onChange={onMetric} options={[["total", "总量"], ["input", "输入"], ["output", "输出"], ["cacheRead", "缓存命中"]]} />}
+                            </>
+                        )}
+                    </div>
+                </div>
+                <StatsChart chart={chart} statRows={statRows} trendRows={trendRows} points={points} metric={metric} />
+            </div>
+
+            <div className="mt-6 rounded-xl border border-zinc-800 bg-[#151515] p-4">
+                <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+                    <div className="flex flex-wrap gap-2">
+                        <TabButton active={table === "logs"} onClick={() => onTable("logs")}>请求日志</TabButton>
+                        <TabButton active={table === "provider"} onClick={() => onTable("provider")}>按平台</TabButton>
+                        <TabButton active={table === "model"} onClick={() => onTable("model")}>按模型</TabButton>
+                        <TabButton active={table === "app"} onClick={() => onTable("app")}>按应用</TabButton>
+                    </div>
+                    {table === "logs" && <button className="rounded-xl border border-zinc-700 px-3 py-2 text-sm font-semibold text-zinc-300 hover:bg-zinc-900" type="button" onClick={() => exportFilteredLogs(filter)}>导出 CSV</button>}
+                </div>
+                {table === "logs" ? (
+                    <>
+                        <CallLogTable items={logPage.items || []} />
+                        <div className="mt-4 flex items-center justify-between text-sm text-zinc-400">
+                            <span>共 {logPage.total || 0} 条 · 第 {logPageNum} / {maxPage} 页</span>
+                            <div className="flex gap-2">
+                                <button className="rounded-lg border border-zinc-700 px-3 py-1.5 disabled:opacity-40" type="button" disabled={logPageNum <= 1} onClick={() => onPage(logPageNum - 1)}>上一页</button>
+                                <button className="rounded-lg border border-zinc-700 px-3 py-1.5 disabled:opacity-40" type="button" disabled={logPageNum >= maxPage} onClick={() => onPage(logPageNum + 1)}>下一页</button>
+                            </div>
+                        </div>
+                    </>
+                ) : (
+                    <StatRowsTable rows={statRows[table] || []} />
+                )}
             </div>
         </section>
     );
 }
 
-function TokenTrendChart({points}) {
-    const width = 720;
-    const labelWidth = 110;
-    const valueWidth = 130;
-    const chartWidth = width - labelWidth - valueWidth;
-    const rowHeight = 36;
-    const height = points.length * rowHeight + 12;
-    const maxTokens = Math.max(1, ...points.map((point) => tokenTotal(point)));
+function StatsChart({chart, statRows, trendRows, points, metric}) {
+    const option = useMemo(() => {
+        if (chart.endsWith("Pie")) {
+            const key = chart === "appPie" ? "app" : chart === "modelPie" ? "model" : "provider";
+            return pieOption(statRows[key] || []);
+        }
+        if (chart === "bar") return timeOption(trendRows || [], "bar");
+        if (chart === "line") return lineOption(trendRows || [], points || [], metric);
+        return {};
+    }, [chart, statRows, trendRows, points, metric]);
+    return <EChart option={option} empty={!hasChartData(option)} />;
+}
+
+function EChart({option, empty}) {
+    const ref = useRef(null);
+    useEffect(() => {
+        if (!ref.current || empty) return undefined;
+        const chart = echarts.init(ref.current, "dark");
+        chart.setOption(option);
+        const resize = () => chart.resize();
+        window.addEventListener("resize", resize);
+        return () => {
+            window.removeEventListener("resize", resize);
+            chart.dispose();
+        };
+    }, [option, empty]);
+    if (empty) return <div className="grid h-72 place-items-center text-zinc-500">暂无调用日志。</div>;
+    return <div ref={ref} className="h-80 w-full" />;
+}
+
+function CallLogTable({items}) {
     return (
-        <svg className="h-auto w-full" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Token 趋势图">
-            {points.map((point, index) => {
-                const y = index * rowHeight + 18;
-                const parts = tokenParts(point);
-                let x = labelWidth;
-                return (
-                    <g key={point.date}>
-                        <text x="16" y={y + 5} fill="#a1a1aa" fontSize="13">{point.date}</text>
-                        <rect x={labelWidth} y={y - 8} width={chartWidth} height="12" rx="6" fill="#27272a" />
-                        {parts.map((part) => {
-                            const w = Math.round((part.value / maxTokens) * chartWidth);
-                            const rect = <rect key={part.name} x={x} y={y - 8} width={w} height="12" fill={part.color} />;
-                            x += w;
-                            return rect;
-                        })}
-                        <text x={width - 16} y={y + 5} fill="#d4d4d8" fontSize="13" textAnchor="end">
-                            {tokenTotal(point)} tokens · {point.calls} 次
-                        </text>
-                    </g>
-                );
-            })}
-        </svg>
+        <div className="overflow-x-auto">
+            <table className="w-full min-w-[1100px] text-left text-sm">
+                <thead className="bg-zinc-900/70 text-xs text-zinc-500">
+                    <tr>
+                        {["调用时间", "提供商", "模型", "应用", "输入", "输出", "缓存命中", "状态码", "协议", "耗时ms", "流式", "错误信息"].map((label) => <th key={label} className="px-3 py-3">{label}</th>)}
+                    </tr>
+                </thead>
+                <tbody className="divide-y divide-zinc-800">
+                    {items.map((item) => (
+                        <tr key={item.id}>
+                            <td className="px-3 py-3 text-zinc-300">{formatTime(item.startedAt)}</td>
+                            <td className="px-3 py-3 text-zinc-400">{item.providerId || "—"}</td>
+                            <td className="px-3 py-3 text-zinc-400">{item.modelId || "—"}</td>
+                            <td className="px-3 py-3 text-zinc-300">{item.appName || "无应用"}</td>
+                            <td className="px-3 py-3">{fmt(item.inputTokens)}</td>
+                            <td className="px-3 py-3">{fmt(item.outputTokens)}</td>
+                            <td className="px-3 py-3">{fmt(item.cacheReadInputTokens)}</td>
+                            <td className="px-3 py-3">{item.statusCode || "—"}</td>
+                            <td className="px-3 py-3 text-zinc-400">{item.protocol}</td>
+                            <td className="px-3 py-3">{fmt(item.durationMs)}</td>
+                            <td className="px-3 py-3">{item.stream ? "是" : "否"}</td>
+                            <td className="max-w-[280px] truncate px-3 py-3 text-red-300" title={item.error}>{item.error || "—"}</td>
+                        </tr>
+                    ))}
+                    {!items.length && <tr><td className="px-4 py-8 text-center text-zinc-500" colSpan="12">暂无调用日志。</td></tr>}
+                </tbody>
+            </table>
+        </div>
     );
+}
+
+function StatRowsTable({rows}) {
+    return (
+        <div className="overflow-x-auto">
+            <table className="w-full min-w-[780px] text-left text-sm">
+                <thead className="bg-zinc-900/70 text-xs text-zinc-500">
+                    <tr>
+                        {["名称", "调用次数", "输入", "输出", "缓存写入", "缓存命中", "总 Token", "占比"].map((label) => <th key={label} className="px-4 py-3">{label}</th>)}
+                    </tr>
+                </thead>
+                <tbody className="divide-y divide-zinc-800">
+                    {rows.map((row) => (
+                        <tr key={row.name}>
+                            <td className="px-4 py-3 font-semibold text-zinc-100">{row.name}</td>
+                            <td className="px-4 py-3">{fmt(row.calls)}</td>
+                            <td className="px-4 py-3">{fmt(row.inputTokens)}</td>
+                            <td className="px-4 py-3">{fmt(row.outputTokens)}</td>
+                            <td className="px-4 py-3">{fmt(row.cacheCreationInputTokens)}</td>
+                            <td className="px-4 py-3">{fmt(row.cacheReadInputTokens)}</td>
+                            <td className="px-4 py-3">{fmt(row.totalTokens)}</td>
+                            <td className="px-4 py-3">{Math.round((row.share || 0) * 1000) / 10}%</td>
+                        </tr>
+                    ))}
+                    {!rows.length && <tr><td className="px-4 py-8 text-center text-zinc-500" colSpan="8">暂无统计。</td></tr>}
+                </tbody>
+            </table>
+        </div>
+    );
+}
+
+function TabButton({active, onClick, children}) {
+    return (
+        <button className={`rounded-lg px-3 py-1.5 text-sm font-semibold ${active ? "bg-zinc-100 text-zinc-950" : "border border-zinc-700 text-zinc-300 hover:bg-zinc-900"}`} type="button" onClick={onClick}>
+            {children}
+        </button>
+    );
+}
+
+function pieOption(rows) {
+    return {
+        backgroundColor: "transparent",
+        tooltip: {trigger: "item"},
+        legend: {bottom: 0, textStyle: {color: "#a1a1aa"}},
+        series: [{type: "pie", radius: ["42%", "68%"], data: rows.map((row) => ({name: row.name, value: row.totalTokens || 0}))}],
+    };
+}
+
+function timeOption(rows, type) {
+    const buckets = [...new Set(rows.map((row) => row.bucket))];
+    const names = [...new Set(rows.map((row) => row.name))];
+    return {
+        backgroundColor: "transparent",
+        tooltip: {trigger: "axis"},
+        legend: {top: 0, textStyle: {color: "#a1a1aa"}},
+        xAxis: {type: "category", data: buckets},
+        yAxis: {type: "value"},
+        series: names.map((name) => ({
+            name,
+            type,
+            stack: type === "bar" ? "tokens" : undefined,
+            smooth: type === "line",
+            data: buckets.map((bucket) => metricValue(rows.find((row) => row.bucket === bucket && row.name === name) || {}, "total")),
+        })),
+    };
+}
+
+function lineOption(rows, points, metric) {
+    if (rows.length) {
+        const buckets = [...new Set(rows.map((row) => row.bucket))];
+        const names = [...new Set(rows.map((row) => row.name))];
+        return {
+            backgroundColor: "transparent",
+            tooltip: {trigger: "axis"},
+            legend: {top: 0, textStyle: {color: "#a1a1aa"}},
+            xAxis: {type: "category", data: buckets},
+            yAxis: {type: "value"},
+            series: names.map((name) => ({
+                name,
+                type: "line",
+                smooth: true,
+                data: buckets.map((bucket) => metricValue(rows.find((row) => row.bucket === bucket && row.name === name) || {}, metric)),
+            })),
+        };
+    }
+    return {
+        backgroundColor: "transparent",
+        tooltip: {trigger: "axis"},
+        legend: {top: 0, textStyle: {color: "#a1a1aa"}},
+        xAxis: {type: "category", data: points.map((point) => point.date)},
+        yAxis: {type: "value"},
+        series: [
+            {name: "输入", type: "line", smooth: true, data: points.map((point) => point.inputTokens || 0)},
+            {name: "输出", type: "line", smooth: true, data: points.map((point) => point.outputTokens || 0)},
+            {name: "缓存命中", type: "line", smooth: true, data: points.map((point) => point.cacheReadInputTokens || 0)},
+        ],
+    };
+}
+
+function metricValue(row, metric) {
+    if (metric === "input") return row.inputTokens || 0;
+    if (metric === "output") return row.outputTokens || 0;
+    if (metric === "cacheRead") return row.cacheReadInputTokens || 0;
+    return tokenTotal(row);
+}
+
+function hasChartData(option) {
+    return (option.series || []).some((series) => (series.data || []).some((item) => (typeof item === "number" ? item : item.value) > 0));
 }
 
 function tokenParts(point) {
@@ -859,6 +1267,67 @@ function nonCacheInput(point) {
 
 function tokenTotal(point) {
     return (point.inputTokens || 0) + (point.outputTokens || 0);
+}
+
+function statsFilterPayload(filter) {
+    return {
+        from: filter.from ? `${filter.from}T00:00:00Z` : "",
+        to: filter.to ? `${filter.to}T23:59:59Z` : "",
+        providerId: filter.providerId || "",
+        modelId: filter.modelId || "",
+        appName: filter.appName || "",
+    };
+}
+
+function maskKey(key = "") {
+    if (key.length <= 12) return key;
+    return `${key.slice(0, 7)}…${key.slice(-6)}`;
+}
+
+function fmt(value) {
+    return Number(value || 0).toLocaleString();
+}
+
+function formatTime(value) {
+    if (!value) return "—";
+    return value.replace("T", " ").replace("Z", "");
+}
+
+async function exportFilteredLogs(filter) {
+    const page = await CallLogs(statsFilterPayload(filter), 1, 10000);
+    if ((page.total || 0) > (page.items || []).length) {
+        alert(`当前筛选共 ${page.total} 条日志，本次导出前 ${(page.items || []).length} 条。请缩小时间范围后导出完整结果。`);
+    }
+    exportLogsCSV(page.items || []);
+}
+
+function exportLogsCSV(items) {
+    const headers = ["调用时间", "提供商", "模型", "应用", "输入", "输出", "缓存命中", "状态码", "协议", "耗时ms", "是否流式", "错误信息"];
+    const rows = items.map((item) => [
+        item.startedAt,
+        item.providerId,
+        item.modelId,
+        item.appName || "无应用",
+        item.inputTokens,
+        item.outputTokens,
+        item.cacheReadInputTokens,
+        item.statusCode,
+        item.protocol,
+        item.durationMs,
+        item.stream ? "是" : "否",
+        item.error || "",
+    ]);
+    const csv = [headers, ...rows].map((row) => row.map(csvCell).join(",")).join("\n");
+    const url = URL.createObjectURL(new Blob([`\uFEFF${csv}`], {type: "text/csv;charset=utf-8"}));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `localrelay-call-logs-${today()}.csv`;
+    link.click();
+    URL.revokeObjectURL(url);
+}
+
+function csvCell(value) {
+    return `"${String(value ?? "").replaceAll("\"", "\"\"")}"`;
 }
 
 function Legend({color, label}) {
@@ -1195,6 +1664,17 @@ function daysAgo(days) {
     const date = new Date();
     date.setDate(date.getDate() - days);
     return date.toISOString().slice(0, 10);
+}
+
+function grainAllowed(filter, grain) {
+    if (grain === "hour" || !filter.from || !filter.to) return true;
+    const days = (new Date(filter.to) - new Date(filter.from)) / 86400000;
+    return grain === "day" ? days >= 1 : days >= 7;
+}
+
+function coerceGrain(filter, grain) {
+    if (grainAllowed(filter, grain)) return grain;
+    return grainAllowed(filter, "day") ? "day" : "hour";
 }
 
 function SearchIcon() {
