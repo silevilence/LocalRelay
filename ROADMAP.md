@@ -56,7 +56,8 @@
 - [ ] **实现对外协议入站解析补全（Anthropic/Gemini/OpenAI Response → IR）**
   - [ ] 实现 Anthropic Messages 请求解析为 IR
   - [ ] 实现 Gemini 请求解析为 IR
-  - [ ] 实现 OpenAI Response 请求解析为 IR  - [ ] 各协议入站时按各自方式识别 API Key 并写入统计应用列（Anthropic: `x-api-key`；Gemini: `x-goog-api-key` 或 query `key`；OpenAI Response: `Authorization: Bearer`），识别规则与 OpenAI Chat 入站保持一致
+  - [ ] 实现 OpenAI Response 请求解析为 IR
+  - [ ] 各协议入站时按各自方式识别 API Key 并写入统计应用列（Anthropic: `x-api-key`；Gemini: `x-goog-api-key` 或 query `key`；OpenAI Response: `Authorization: Bearer`），识别规则与 OpenAI Chat 入站保持一致
 
 ## ✅ 已完成
 
