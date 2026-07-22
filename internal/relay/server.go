@@ -13,9 +13,12 @@ import (
 	"time"
 
 	"localrelay/internal/capabilities"
+	"localrelay/internal/ir"
 	"localrelay/internal/protocol/openaichat"
 	"localrelay/internal/store"
 )
+
+const statusClientClosedRequest = 499
 
 type Server struct {
 	store   *store.Store
@@ -97,13 +100,6 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		writeError(w, status, "bad_request", err.Error())
 		return
 	}
-	if clientReq.Stream {
-		status = http.StatusBadRequest
-		log.Error = "stream is not supported yet"
-		writeError(w, status, "unsupported_stream", log.Error)
-		return
-	}
-
 	routed, err := s.store.GetRoutedModel(clientReq.Model)
 	if err != nil {
 		status = routeStatus(err)
@@ -152,6 +148,23 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer upstreamResp.Body.Close()
+	if clientReq.Stream && upstreamResp.StatusCode >= 200 && upstreamResp.StatusCode < 300 {
+		if _, ok := w.(http.Flusher); !ok {
+			status = http.StatusInternalServerError
+			log.Error = "streaming is not supported by response writer"
+			writeError(w, status, "streaming_unavailable", log.Error)
+			return
+		}
+		if err := s.streamProviderResponse(r.Context(), w, upstreamResp.Body, providerCapabilities, routed.Provider.ID+"/"+routed.Model.ID, &log); err != nil {
+			log.Error = err.Error()
+			if errors.Is(err, context.Canceled) {
+				status = statusClientClosedRequest
+			} else {
+				status = http.StatusBadGateway
+			}
+		}
+		return
+	}
 	respBody, err := io.ReadAll(upstreamResp.Body)
 	if err != nil {
 		status = http.StatusBadGateway
@@ -189,6 +202,42 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, status, clientResp)
+}
+
+func (s *Server) streamProviderResponse(ctx context.Context, w http.ResponseWriter, body io.Reader, cfg capabilities.Provider, model string, log *store.CallLog) error {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		return errors.New("streaming is not supported by response writer")
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+	flusher.Flush()
+	return openaichat.ForEachStreamEvent(body, cfg, func(event ir.StreamEvent) error {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		event.Model = model
+		if event.Usage != (ir.Usage{}) {
+			log.InputTokens = event.Usage.InputTokens
+			log.OutputTokens = event.Usage.OutputTokens
+			log.CacheCreationInputTokens = event.Usage.CacheCreationInputTokens
+			log.CacheReadInputTokens = event.Usage.CacheReadInputTokens
+		}
+		if err := openaichat.WriteStreamEvent(w, event, cfg); err != nil {
+			return err
+		}
+		flusher.Flush()
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		return nil
+	})
 }
 
 func (s *Server) queueLog(log store.CallLog) {

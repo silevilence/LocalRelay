@@ -23,6 +23,7 @@ const (
 
 type Request struct {
 	Model    string    `json:"model"`
+	Stream   bool      `json:"stream,omitempty"`
 	Messages []Message `json:"messages"`
 	Tools    []Tool    `json:"tools,omitempty"`
 	Params   Params    `json:"params,omitempty"`

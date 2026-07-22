@@ -2,6 +2,7 @@ package openaichat
 
 import (
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
@@ -13,6 +14,7 @@ func TestParseTextChatToIR(t *testing.T) {
 	temp := 0.2
 	req, err := Request{
 		Model:       "gpt-4.1-mini",
+		Stream:      true,
 		Temperature: &temp,
 		Messages: []Message{
 			{Role: "system", Content: "You are concise."},
@@ -22,7 +24,7 @@ func TestParseTextChatToIR(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if req.Model != "gpt-4.1-mini" || req.Params.Temperature == nil || *req.Params.Temperature != temp {
+	if req.Model != "gpt-4.1-mini" || !req.Stream || req.Params.Temperature == nil || *req.Params.Temperature != temp {
 		t.Fatalf("request = %#v", req)
 	}
 	if got := req.Messages[1].Content[0].Text; got != "Hello" {
@@ -228,6 +230,136 @@ func TestOpenAIConfigDropsThinkingHistory(t *testing.T) {
 	}
 	if strings.Contains(string(data), "private") {
 		t.Fatalf("thinking leaked into generic OpenAI request: %s", data)
+	}
+}
+
+func TestOpenAIChatStreamRoundTripsThroughIR(t *testing.T) {
+	cfg := mustCapabilities(t, capabilities.DefaultJSON("deepseek"))
+	events, err := ParseStream(strings.NewReader(strings.Join([]string{
+		`data: {"id":"chatcmpl_1","model":"deepseek-v4-pro","choices":[{"index":0,"delta":{"role":"assistant"}}]}`,
+		``,
+		`data: {"id":"chatcmpl_1","model":"deepseek-v4-pro","choices":[{"index":0,"delta":{"reasoning_content":"think "}}]}`,
+		``,
+		`data: {"id":"chatcmpl_1","model":"deepseek-v4-pro","choices":[{"index":0,"delta":{"content":"done"}}]}`,
+		``,
+		`data: {"id":"chatcmpl_1","model":"deepseek-v4-pro","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{\"q\""}}]}}]}`,
+		``,
+		`data: {"id":"chatcmpl_1","model":"deepseek-v4-pro","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":":1}"}}]}}]}`,
+		``,
+		`data: {"id":"chatcmpl_1","model":"deepseek-v4-pro","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+		``,
+		`data: {"id":"chatcmpl_1","model":"deepseek-v4-pro","choices":[],"usage":{"prompt_tokens":5,"completion_tokens":2,"prompt_tokens_details":{"cached_tokens":1}}}`,
+		``,
+		`data: [DONE]`,
+		``,
+	}, "\n")), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if events[0].Type != ir.StreamMessageStart || events[1].Type != ir.StreamChoiceStart || events[1].Role != ir.RoleAssistant {
+		t.Fatalf("start events = %#v", events[:2])
+	}
+	if !hasStreamDelta(events, ir.BlockThinking, "think ", "") {
+		t.Fatalf("missing thinking delta: %#v", events)
+	}
+	if !hasStreamDelta(events, ir.BlockText, "done", "") {
+		t.Fatalf("missing text delta: %#v", events)
+	}
+	if !hasStreamDelta(events, ir.BlockToolCall, "", `{"q"`) || !hasStreamDelta(events, ir.BlockToolCall, "", ":1}") {
+		t.Fatalf("missing tool argument delta: %#v", events)
+	}
+	if events[len(events)-2].Usage.InputTokens != 5 || events[len(events)-2].Usage.OutputTokens != 2 || events[len(events)-2].Usage.CacheReadInputTokens != 1 {
+		t.Fatalf("usage event = %#v", events[len(events)-2])
+	}
+	if events[len(events)-1].Type != ir.StreamMessageStop {
+		t.Fatalf("last event = %#v", events[len(events)-1])
+	}
+
+	var out strings.Builder
+	for _, event := range events {
+		event.Model = "deepseek/deepseek-v4-pro"
+		if err := WriteStreamEvent(&out, event, cfg); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got := out.String()
+	if !strings.Contains(got, `"model":"deepseek/deepseek-v4-pro"`) || !strings.Contains(got, `"reasoning_content":"think "`) || !strings.Contains(got, `data: [DONE]`) {
+		t.Fatalf("stream output = %s", got)
+	}
+	if !strings.Contains(got, `"choices":[],"usage"`) {
+		t.Fatalf("usage-only chunk must keep choices array: %s", got)
+	}
+}
+
+func TestOpenAIChatStreamEdgeCases(t *testing.T) {
+	cfg := mustCapabilities(t, capabilities.DefaultJSON("openai"))
+	events, err := ParseStream(strings.NewReader(strings.Join([]string{
+		`: keep-alive`,
+		`data: {"id":"chatcmpl_1","model":"gpt-test","choices":[{"index":0,"delta":{"content":"a"}},{"index":1,"delta":{"content":"b"}}],"usage":{"completion_tokens":1,"prompt_cache_hit_tokens":2,"prompt_cache_miss_tokens":3}}`,
+		``,
+		`data: [DONE]`,
+		``,
+	}, "\n")), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasChoiceStreamDelta(events, 0, ir.BlockText, "a") || !hasChoiceStreamDelta(events, 1, ir.BlockText, "b") {
+		t.Fatalf("multi-choice events = %#v", events)
+	}
+	if events[len(events)-2].Usage.InputTokens != 5 || events[len(events)-2].Usage.CacheReadInputTokens != 2 {
+		t.Fatalf("usage = %#v", events[len(events)-2].Usage)
+	}
+
+	var out strings.Builder
+	if err := WriteStreamEvent(&out, ir.StreamEvent{Type: ir.StreamError, Error: "bad upstream"}, cfg); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), `"error"`) || !strings.Contains(out.String(), "bad upstream") {
+		t.Fatalf("error stream = %s", out.String())
+	}
+
+	out.Reset()
+	if err := WriteStreamEvent(&out, ir.StreamEvent{Type: ir.StreamContentBlockDelta, BlockType: ir.BlockThinking, Delta: "private"}, cfg); err != nil {
+		t.Fatal(err)
+	}
+	if out.Len() != 0 {
+		t.Fatalf("generic OpenAI thinking should be dropped, got %s", out.String())
+	}
+	if err := WriteStreamEvent(&out, ir.StreamEvent{Type: ir.StreamMessageDelta}, cfg); err != nil {
+		t.Fatal(err)
+	}
+	if out.Len() != 0 {
+		t.Fatalf("empty message delta should be dropped, got %s", out.String())
+	}
+}
+
+func TestForEachStreamEventErrorBranches(t *testing.T) {
+	cfg := mustCapabilities(t, capabilities.DefaultJSON("openai"))
+	var events []ir.StreamEvent
+	err := ForEachStreamEvent(strings.NewReader("data: {\n\n"), cfg, func(event ir.StreamEvent) error {
+		events = append(events, event)
+		return nil
+	})
+	if err == nil || len(events) != 1 || events[0].Type != ir.StreamError {
+		t.Fatalf("malformed stream err/events = %v/%#v", err, events)
+	}
+
+	sentinel := errors.New("stop yielding")
+	err = ForEachStreamEvent(strings.NewReader("data: [DONE]\n\n"), cfg, func(ir.StreamEvent) error {
+		return sentinel
+	})
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("yield err = %v", err)
+	}
+
+	readErr := errors.New("read boom")
+	events = nil
+	err = ForEachStreamEvent(errReader{err: readErr}, cfg, func(event ir.StreamEvent) error {
+		events = append(events, event)
+		return nil
+	})
+	if !errors.Is(err, readErr) || len(events) != 1 || events[0].Type != ir.StreamError {
+		t.Fatalf("reader err/events = %v/%#v", err, events)
 	}
 }
 
@@ -449,4 +581,30 @@ func mustCapabilities(t *testing.T, raw string) capabilities.Provider {
 		t.Fatal(err)
 	}
 	return cfg
+}
+
+func hasStreamDelta(events []ir.StreamEvent, blockType ir.BlockType, delta, argDelta string) bool {
+	for _, event := range events {
+		if event.Type == ir.StreamContentBlockDelta && event.BlockType == blockType && event.Delta == delta && event.ArgumentsDelta == argDelta {
+			return true
+		}
+	}
+	return false
+}
+
+func hasChoiceStreamDelta(events []ir.StreamEvent, choice int, blockType ir.BlockType, delta string) bool {
+	for _, event := range events {
+		if event.Type == ir.StreamContentBlockDelta && event.ChoiceIndex == choice && event.BlockType == blockType && event.Delta == delta {
+			return true
+		}
+	}
+	return false
+}
+
+type errReader struct {
+	err error
+}
+
+func (r errReader) Read([]byte) (int, error) {
+	return 0, r.err
 }

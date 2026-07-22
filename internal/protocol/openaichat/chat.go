@@ -122,7 +122,8 @@ func (r Request) ToIR() (ir.Request, error) {
 
 func (r Request) ToIRWithCapabilities(cfg capabilities.Provider) (ir.Request, error) {
 	out := ir.Request{
-		Model: r.Model,
+		Model:  r.Model,
+		Stream: r.Stream,
 		Params: ir.Params{
 			MaxTokens:        r.MaxTokens,
 			Temperature:      r.Temperature,
@@ -277,6 +278,7 @@ func ToProviderRequest(req ir.Request, cfg capabilities.Provider) (Request, erro
 
 	out := Request{
 		Model:            req.Model,
+		Stream:           req.Stream,
 		MaxTokens:        req.Params.MaxTokens,
 		Temperature:      req.Params.Temperature,
 		TopP:             req.Params.TopP,
