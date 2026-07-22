@@ -278,6 +278,9 @@ func (s *Store) DeleteProvider(id string) error {
 	if id == "" {
 		return errors.New("provider id is required")
 	}
+	if _, err := s.db.Exec(`DELETE FROM models WHERE provider_id = ?`, id); err != nil {
+		return err
+	}
 	_, err := s.db.Exec(`DELETE FROM providers WHERE id = ?`, id)
 	return err
 }
@@ -383,7 +386,12 @@ WHERE m.provider_id = ? AND m.id = ?`, providerID, modelID).Scan(
 }
 
 func (s *Store) ListEnabledModels() ([]Model, error) {
-	rows, err := s.db.Query(`SELECT id, provider_id, name, capabilities, context_length, max_tokens, enabled, created_at, updated_at FROM models WHERE enabled = 1 ORDER BY provider_id, name`)
+	rows, err := s.db.Query(`
+SELECT m.id, m.provider_id, m.name, m.capabilities, m.context_length, m.max_tokens, m.enabled, m.created_at, m.updated_at
+FROM models m
+JOIN providers p ON p.id = m.provider_id
+WHERE m.enabled = 1
+ORDER BY m.provider_id, m.name`)
 	if err != nil {
 		return nil, err
 	}
@@ -457,6 +465,37 @@ ORDER BY substr(started_at, 1, 10)`, args...)
 		stats.Points = append(stats.Points, p)
 	}
 	return stats, rows.Err()
+}
+
+func (s *Store) TokenStatModels(filter TokenStatsFilter) ([]string, error) {
+	filter = normalizeStatsFilter(TokenStatsFilter{
+		From:       filter.From,
+		To:         filter.To,
+		ProviderID: filter.ProviderID,
+	})
+	where, args := statsWhere(filter)
+	if where == "" {
+		where = " WHERE model_id IS NOT NULL AND model_id != ''"
+	} else {
+		where += " AND model_id IS NOT NULL AND model_id != ''"
+	}
+	rows, err := s.db.Query(`
+SELECT DISTINCT model_id
+FROM call_logs`+where+`
+ORDER BY model_id`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var models []string
+	for rows.Next() {
+		var model string
+		if err := rows.Scan(&model); err != nil {
+			return nil, err
+		}
+		models = append(models, model)
+	}
+	return models, rows.Err()
 }
 
 func normalizeStatsFilter(filter TokenStatsFilter) TokenStatsFilter {

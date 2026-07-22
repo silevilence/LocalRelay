@@ -219,6 +219,15 @@ func TestListEnabledModelsFiltersDisabled(t *testing.T) {
 	if _, err := s.CreateModel(ModelInput{ID: "also-on", ProviderID: "p2", Name: "Also On"}); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := s.db.Exec(`PRAGMA foreign_keys = OFF`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`INSERT INTO models(id, provider_id, name, created_at, updated_at) VALUES ('orphan', 'deleted', 'Orphan', 'now', 'now')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`PRAGMA foreign_keys = ON`); err != nil {
+		t.Fatal(err)
+	}
 
 	models, err := s.ListEnabledModels()
 	if err != nil {
@@ -266,6 +275,67 @@ func TestCallLogTokenStats(t *testing.T) {
 	}
 	if stats.Calls != 1 || stats.InputTokens != 5 {
 		t.Fatalf("date stats = %#v", stats)
+	}
+
+	models, err := s.TokenStatModels(TokenStatsFilter{ProviderID: "p1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(models, ",") != "m1,m2" {
+		t.Fatalf("logged models = %#v", models)
+	}
+	models, err = s.TokenStatModels(TokenStatsFilter{From: "2026-07-21", To: "2026-07-21"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(models) != 1 || models[0] != "m2" {
+		t.Fatalf("date logged models = %#v", models)
+	}
+}
+
+func TestProviderAndModelDeleteEffectsOnCallLogs(t *testing.T) {
+	s := openTestStore(t)
+	defer s.Close()
+
+	if _, err := s.CreateProvider(ProviderInput{ID: "p1", Name: "P1", Type: "openai", BaseURL: "https://example.test"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CreateModel(ModelInput{ID: "m1", ProviderID: "p1", Name: "M1"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateCallLog(CallLog{ProviderID: "p1", ModelID: "m1", Protocol: "openai_chat", StartedAt: "2026-07-21T01:00:00Z", InputTokens: 10}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteModel("p1", "m1"); err != nil {
+		t.Fatal(err)
+	}
+	stats, err := s.TokenStats(TokenStatsFilter{ProviderID: "p1", ModelID: "m1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Calls != 1 {
+		t.Fatalf("model delete should keep logs addressable, stats = %#v", stats)
+	}
+
+	if err := s.DeleteProvider("p1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CreateProvider(ProviderInput{ID: "p1", Name: "P1 New", Type: "openai", BaseURL: "https://new.example.test"}); err != nil {
+		t.Fatal(err)
+	}
+	stats, err = s.TokenStats(TokenStatsFilter{ProviderID: "p1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Calls != 0 {
+		t.Fatalf("recreated provider should not inherit old logs, stats = %#v", stats)
+	}
+	stats, err = s.TokenStats(TokenStatsFilter{ModelID: "m1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Calls != 1 {
+		t.Fatalf("global model stats should keep old logs, stats = %#v", stats)
 	}
 }
 
@@ -455,6 +525,62 @@ func TestUpdateMissingRows(t *testing.T) {
 	_, err = s.UpdateModel(ModelInput{ID: "missing", ProviderID: "missing", Name: "Missing"})
 	if err != sql.ErrNoRows {
 		t.Fatalf("model update err = %v", err)
+	}
+}
+
+func TestDeleteProviderRemovesModelsWithoutForeignKeyCascade(t *testing.T) {
+	s := openTestStore(t)
+	defer s.Close()
+
+	if _, err := s.db.Exec(`DROP TABLE models`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`DROP TABLE providers`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`
+CREATE TABLE providers (
+	id TEXT PRIMARY KEY,
+	name TEXT NOT NULL,
+	type TEXT NOT NULL,
+	base_url TEXT NOT NULL,
+	api_key_encrypted TEXT NOT NULL DEFAULT '',
+	capability_config TEXT NOT NULL DEFAULT '',
+	created_at TEXT NOT NULL,
+	updated_at TEXT NOT NULL
+);
+CREATE TABLE models (
+	id TEXT NOT NULL,
+	provider_id TEXT NOT NULL,
+	name TEXT NOT NULL,
+	capabilities TEXT NOT NULL DEFAULT '',
+	context_length INTEGER NOT NULL DEFAULT 0,
+	max_tokens INTEGER NOT NULL DEFAULT 0,
+	enabled INTEGER NOT NULL DEFAULT 1,
+	created_at TEXT NOT NULL,
+	updated_at TEXT NOT NULL,
+	PRIMARY KEY (provider_id, id)
+);`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`INSERT INTO providers(id, name, type, base_url, created_at, updated_at)
+VALUES ('deepseek', 'DeepSeek', 'deepseek', 'https://api.deepseek.com', 'now', 'now')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`INSERT INTO models(id, provider_id, name, created_at, updated_at)
+VALUES ('deepseek-v4-pro', 'deepseek', 'DeepSeek V4 Pro', 'now', 'now')`); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.DeleteProvider("deepseek"); err != nil {
+		t.Fatal(err)
+	}
+	models, err := s.ListModels("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(models) != 0 {
+		t.Fatalf("models after provider delete = %#v", models)
 	}
 }
 

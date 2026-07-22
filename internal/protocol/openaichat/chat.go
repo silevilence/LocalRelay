@@ -87,6 +87,8 @@ type Usage struct {
 	PromptTokens        int                 `json:"prompt_tokens,omitempty"`
 	CompletionTokens    int                 `json:"completion_tokens,omitempty"`
 	TotalTokens         int                 `json:"total_tokens,omitempty"`
+	PromptCacheHit      int                 `json:"prompt_cache_hit_tokens,omitempty"`
+	PromptCacheMiss     int                 `json:"prompt_cache_miss_tokens,omitempty"`
 	PromptTokensDetails *PromptTokenDetails `json:"prompt_tokens_details,omitempty"`
 }
 
@@ -165,11 +167,18 @@ func (r Response) ToIR() (ir.Response, error) {
 func (r Response) ToIRWithCapabilities(cfg capabilities.Provider) (ir.Response, error) {
 	out := ir.Response{ID: r.ID, Model: r.Model}
 	if r.Usage != nil {
+		inputTokens := r.Usage.PromptTokens
+		if inputTokens == 0 {
+			inputTokens = r.Usage.PromptCacheHit + r.Usage.PromptCacheMiss
+		}
 		out.Usage = ir.Usage{
-			InputTokens:  r.Usage.PromptTokens,
+			InputTokens:  inputTokens,
 			OutputTokens: r.Usage.CompletionTokens,
 		}
-		if r.Usage.PromptTokensDetails != nil {
+		if r.Usage.PromptCacheHit > 0 {
+			out.Usage.CacheReadInputTokens = r.Usage.PromptCacheHit
+		}
+		if r.Usage.PromptTokensDetails != nil && r.Usage.PromptTokensDetails.CachedTokens > 0 {
 			out.Usage.CacheReadInputTokens = r.Usage.PromptTokensDetails.CachedTokens
 		}
 	}

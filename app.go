@@ -1,11 +1,15 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"localrelay/internal/relay"
@@ -102,8 +106,86 @@ func (a *App) TokenStats(filter store.TokenStatsFilter) (store.TokenStats, error
 	return a.store.TokenStats(filter)
 }
 
+func (a *App) TokenStatModels(filter store.TokenStatsFilter) ([]string, error) {
+	return a.store.TokenStatModels(filter)
+}
+
+type ProviderTestResult struct {
+	Model     string `json:"model"`
+	Content   string `json:"content"`
+	LatencyMs int64  `json:"latencyMs"`
+}
+
+func (a *App) TestProviderModel(providerID string, modelID string) (ProviderTestResult, error) {
+	routed, err := a.store.GetRoutedModel(strings.TrimSpace(providerID) + "/" + strings.TrimSpace(modelID))
+	if err != nil {
+		return ProviderTestResult{}, err
+	}
+	body, err := json.Marshal(map[string]any{
+		"model": routed.Model.ID,
+		"messages": []map[string]string{{
+			"role":    "user",
+			"content": "Reply with OK.",
+		}},
+		"max_tokens": 16,
+	})
+	if err != nil {
+		return ProviderTestResult{}, err
+	}
+	req, err := http.NewRequest(http.MethodPost, providerChatURL(routed.Provider.BaseURL), bytes.NewReader(body))
+	if err != nil {
+		return ProviderTestResult{}, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if routed.Provider.APIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+routed.Provider.APIKey)
+	}
+
+	start := time.Now()
+	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+	if err != nil {
+		return ProviderTestResult{}, err
+	}
+	defer resp.Body.Close()
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if err != nil {
+		return ProviderTestResult{}, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return ProviderTestResult{}, fmt.Errorf("upstream returned %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
+	}
+
+	var out struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(respBody, &out); err != nil {
+		return ProviderTestResult{}, err
+	}
+	content := ""
+	if len(out.Choices) > 0 {
+		content = out.Choices[0].Message.Content
+	}
+	return ProviderTestResult{
+		Model:     routed.Provider.ID + "/" + routed.Model.ID,
+		Content:   content,
+		LatencyMs: time.Since(start).Milliseconds(),
+	}, nil
+}
+
 func (a *App) RelayBaseURL() string {
 	return "http://127.0.0.1:8718"
+}
+
+func providerChatURL(base string) string {
+	base = strings.TrimRight(strings.TrimSpace(base), "/")
+	if strings.HasSuffix(base, "/chat/completions") {
+		return base
+	}
+	return base + "/chat/completions"
 }
 
 func defaultDBPath() string {

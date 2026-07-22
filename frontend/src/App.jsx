@@ -8,13 +8,18 @@ import {
     ListProviderPresets,
     ListProviders,
     RelayBaseURL,
+    TokenStatModels,
     TokenStats,
+    TestProviderModel,
     UpdateModel,
     UpdateProvider,
 } from "../wailsjs/go/main/App";
 
 const emptyProvider = {id: "", name: "", type: "openai", baseUrl: "", apiKey: "", capabilityConfig: ""};
 const emptyModel = {id: "", providerId: "", name: "", capabilities: "", contextLength: 0, maxTokens: 0, enabled: true};
+const thinkingRequestFieldOptions = ["thinking", "enable_thinking", "thinking_budget"];
+const reasoningValueOptions = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+const reasoningMapSources = ["none", "minimal", "low", "medium", "high", "xhigh"];
 
 function App() {
     const [providers, setProviders] = useState([]);
@@ -25,13 +30,22 @@ function App() {
     const [providerDraft, setProviderDraft] = useState(emptyProvider);
     const [modelDraft, setModelDraft] = useState(emptyModel);
     const [search, setSearch] = useState("");
+    const [page, setPage] = useState("providers");
     const [isAddingProvider, setIsAddingProvider] = useState(false);
     const [editingModel, setEditingModel] = useState(false);
     const [showModelForm, setShowModelForm] = useState(false);
+    const [showProviderTest, setShowProviderTest] = useState(false);
+    const [testModelId, setTestModelId] = useState("");
+    const [testResult, setTestResult] = useState(null);
+    const [isTestingProvider, setIsTestingProvider] = useState(false);
+    const [showPresetPicker, setShowPresetPicker] = useState(false);
+    const [presetSearch, setPresetSearch] = useState("");
     const [showKey, setShowKey] = useState(false);
     const [message, setMessage] = useState("正在加载本地配置…");
+    const [toast, setToast] = useState("");
     const [relayBaseUrl, setRelayBaseUrl] = useState("");
     const [statsFilter, setStatsFilter] = useState({from: daysAgo(7), to: today(), providerId: "", modelId: ""});
+    const [statsModelOptions, setStatsModelOptions] = useState([]);
     const [stats, setStats] = useState({points: [], calls: 0, inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0});
 
     const selectedProvider = useMemo(
@@ -55,6 +69,20 @@ function App() {
         }, {});
     }, [models]);
 
+    const filteredPresets = useMemo(() => {
+        const needle = presetSearch.trim().toLowerCase();
+        if (!needle) return providerPresets;
+        return providerPresets.filter((preset) =>
+            [
+                preset.id,
+                preset.name,
+                preset.type,
+                preset.baseUrl,
+                ...(preset.models || []).flatMap((model) => [model.id, model.name]),
+            ].some((value) => value?.toLowerCase().includes(needle)),
+        );
+    }, [providerPresets, presetSearch]);
+
     useEffect(() => {
         refreshProviders();
         ListProviderPresets().then((items) => setProviderPresets(items || [])).catch(() => {});
@@ -64,6 +92,10 @@ function App() {
     useEffect(() => {
         refreshStats();
     }, [statsFilter]);
+
+    useEffect(() => {
+        refreshStatsModelOptions();
+    }, [statsFilter.from, statsFilter.to, statsFilter.providerId]);
 
     useEffect(() => {
         if (selectedProvider) {
@@ -108,7 +140,12 @@ function App() {
             if (isAddingProvider) {
                 await CreateProvider(payload);
                 for (const model of preset?.models || []) {
-                    await CreateModel({...model, providerId: payload.id, enabled: model.enabled !== false});
+                    const modelPayload = {...model, providerId: payload.id, enabled: model.enabled !== false};
+                    try {
+                        await CreateModel(modelPayload);
+                    } catch {
+                        await UpdateModel(modelPayload);
+                    }
                 }
             } else {
                 await UpdateProvider(payload);
@@ -117,7 +154,9 @@ function App() {
             setSelectedProviderId(payload.id);
             setIsAddingProvider(false);
             setSelectedPresetId("");
-            setMessage(isAddingProvider ? `平台已添加${preset?.models?.length ? `，并导入 ${preset.models.length} 个预设模型。` : "。"}` : "平台配置已保存。");
+            const success = isAddingProvider ? `平台已添加${preset?.models?.length ? `，并导入 ${preset.models.length} 个预设模型。` : "。"}` : "平台配置已保存。";
+            setMessage(success);
+            notify(success);
         } catch (error) {
             setMessage(`保存平台失败：${error}`);
         }
@@ -154,10 +193,17 @@ function App() {
             setModelDraft({...emptyModel, providerId: selectedProviderId});
             setEditingModel(false);
             setShowModelForm(false);
-            setMessage(editingModel ? "模型已更新。" : "模型已添加。");
+            const success = editingModel ? "模型已更新。" : "模型已添加。";
+            setMessage(success);
+            notify(success);
         } catch (error) {
             setMessage(`保存模型失败：${error}`);
         }
+    }
+
+    function notify(text) {
+        setToast(text);
+        window.setTimeout(() => setToast(""), 2400);
     }
 
     async function removeModel(model) {
@@ -177,6 +223,7 @@ function App() {
         setIsAddingProvider(true);
         setSelectedProviderId("");
         setModels([]);
+        setPage("providers");
     }
 
     function applyProviderPreset(preset) {
@@ -193,6 +240,7 @@ function App() {
         setSelectedProviderId("");
         setModels([]);
         setMessage(`已套用「${preset.name}」预设，填入 API Key 后保存。`);
+        setShowPresetPicker(false);
     }
 
     function startAddModel() {
@@ -211,6 +259,38 @@ function App() {
         setShowModelForm(true);
     }
 
+    function openProviderTest() {
+        if (isAddingProvider || !activeProvider) {
+            setMessage("请先保存平台，再选择模型检测。");
+            notify("请先保存平台");
+            return;
+        }
+        const enabledModels = models.filter((model) => model.enabled !== false);
+        if (!enabledModels.length) {
+            setMessage("至少配置并启用一个模型后才能检测。");
+            notify("请先配置模型");
+            return;
+        }
+        setTestModelId(enabledModels[0].id);
+        setTestResult(null);
+        setShowProviderTest(true);
+    }
+
+    async function runProviderTest() {
+        if (!activeProvider || !testModelId) return;
+        setIsTestingProvider(true);
+        setTestResult(null);
+        try {
+            const result = await TestProviderModel(activeProvider.id, testModelId);
+            setTestResult({ok: true, ...result});
+            notify("检测通过");
+        } catch (error) {
+            setTestResult({ok: false, error: String(error)});
+        } finally {
+            setIsTestingProvider(false);
+        }
+    }
+
     async function refreshStats() {
         try {
             const result = await TokenStats({
@@ -225,181 +305,293 @@ function App() {
         }
     }
 
+    async function refreshStatsModelOptions() {
+        try {
+            const options = await TokenStatModels({
+                from: statsFilter.from ? `${statsFilter.from}T00:00:00Z` : "",
+                to: statsFilter.to ? `${statsFilter.to}T23:59:59Z` : "",
+                providerId: statsFilter.providerId,
+                modelId: "",
+            });
+            const items = options || [];
+            setStatsModelOptions(items);
+            setStatsFilter((current) => current.modelId && !items.includes(current.modelId) ? {...current, modelId: ""} : current);
+        } catch (error) {
+            setMessage(`加载模型筛选项失败：${error}`);
+        }
+    }
+
     const providerCount = providers.length;
     const activeProvider = isAddingProvider ? null : selectedProvider;
 
     return (
-        <div className="flex h-screen overflow-hidden bg-[#141414] text-zinc-100">
-            <aside className="flex w-[320px] shrink-0 flex-col border-r border-zinc-800 bg-[#151515] p-3">
-                <label className="mb-4 flex items-center gap-2 rounded-2xl border border-zinc-800 bg-[#101010] px-4 py-3 text-zinc-500">
-                    <span>⌕</span>
-                    <input
-                        className="min-w-0 flex-1 bg-transparent text-sm text-zinc-200 outline-none placeholder:text-zinc-600"
-                        value={search}
-                        onChange={(event) => setSearch(event.target.value)}
-                        placeholder="搜索模型平台..."
-                    />
-                    <span className="text-zinc-500">♢</span>
-                </label>
-
-                <div className="min-h-0 flex-1 space-y-1 overflow-y-auto pr-1">
-                    {visibleProviders.map((provider) => (
-                        <button
-                            key={provider.id}
-                            className={`flex w-full items-center gap-3 rounded-2xl px-3 py-2.5 text-left transition ${
-                                provider.id === selectedProviderId && !isAddingProvider
-                                    ? "border border-zinc-700 bg-zinc-800/70"
-                                    : "hover:bg-zinc-900"
-                            }`}
-                            type="button"
-                            onClick={() => setSelectedProviderId(provider.id)}
-                        >
-                            <Avatar name={provider.name || provider.id} />
-                            <span className="min-w-0 flex-1 truncate text-base font-semibold text-zinc-200">{provider.name}</span>
-                            <span className="rounded-full border border-green-700/60 bg-green-950/70 px-2 py-0.5 text-xs font-bold text-green-400">ON</span>
-                        </button>
-                    ))}
+        <div className="flex h-screen flex-col overflow-hidden bg-[#141414] text-zinc-100">
+            <header className="flex shrink-0 items-center justify-between border-b border-zinc-800 bg-[#151515] px-6 py-3">
+                <div>
+                    <h1 className="text-lg font-bold">LocalRelay</h1>
+                    <p className="text-xs text-zinc-500">本地模型网关配置</p>
                 </div>
+                <div className="grid w-72 grid-cols-2 gap-2">
+                    <NavButton active={page === "providers"} onClick={() => setPage("providers")}>配置</NavButton>
+                    <NavButton active={page === "stats"} onClick={() => setPage("stats")}>Token 统计</NavButton>
+                </div>
+            </header>
 
-                <button
-                    className="mt-3 rounded-xl border border-zinc-700 px-4 py-2.5 text-base font-semibold text-zinc-100 transition hover:bg-zinc-900"
-                    type="button"
-                    onClick={startAddProvider}
-                >
-                    ＋ 添加
-                </button>
-            </aside>
-
-            <main className="min-w-0 flex-1 overflow-y-auto px-7 py-5">
-                <div className="mx-auto max-w-7xl">
-                    <div className="mb-4 flex items-center justify-between border-b border-zinc-800 pb-5">
-                        <div className="flex min-w-0 items-center gap-3">
-                            <h1 className="truncate text-xl font-bold">{isAddingProvider ? "添加模型平台" : activeProvider?.name || "选择模型平台"}</h1>
-                            {!isAddingProvider && activeProvider && <span className="text-zinc-400">◎</span>}
-                        </div>
-                        <button
-                            className="h-8 w-14 rounded-full bg-emerald-500 p-1"
-                            type="button"
-                            onClick={() => setMessage("启用开关暂未落库，后续接入路由开关时启用。")}
-                        >
-                            <span className="block h-6 w-6 translate-x-6 rounded-full bg-white" />
-                        </button>
+            {page === "stats" ? (
+                <main className="min-h-0 flex-1 overflow-y-auto px-7 py-5">
+                    <div className="mx-auto max-w-7xl">
+                        <StatsPanel
+                            baseUrl={relayBaseUrl}
+                            stats={stats}
+                            filter={statsFilter}
+                            providers={providers}
+                            modelOptions={statsModelOptions}
+                            onChange={(patch) => setStatsFilter({...statsFilter, ...patch})}
+                            onRefresh={refreshStats}
+                        />
+                        <StatusMessage message={message} providerCount={providerCount} />
                     </div>
-
-                    {(activeProvider || isAddingProvider) ? (
-                        <>
-                            <ProviderPanel
-                                draft={providerDraft}
-                                isAdding={isAddingProvider}
-                                presets={providerPresets}
-                                selectedPresetId={selectedPresetId}
-                                showKey={showKey}
-                                onToggleKey={() => setShowKey((value) => !value)}
-                                onChange={(patch) => setProviderDraft({...providerDraft, ...patch})}
-                                onApplyPreset={applyProviderPreset}
-                                onSubmit={saveProvider}
-                                onDelete={activeProvider ? () => removeProvider(activeProvider) : null}
-                                onTest={() => setMessage("检测接口尚未实现；当前仅保存本地配置。")}
+                </main>
+            ) : (
+                <div className="flex min-h-0 flex-1">
+                    <aside className="flex w-[320px] shrink-0 flex-col border-r border-zinc-800 bg-[#151515] p-3">
+                        <label className="mb-4 flex items-center gap-2 rounded-2xl border border-zinc-800 bg-[#101010] px-4 py-3 text-zinc-500">
+                            <SearchIcon />
+                            <input
+                                className="min-w-0 flex-1 bg-transparent text-sm text-zinc-200 outline-none placeholder:text-zinc-600"
+                                value={search}
+                                onChange={(event) => setSearch(event.target.value)}
+                                placeholder="搜索模型平台..."
                             />
+                        </label>
 
-                            {!isAddingProvider && (
-                                <section className="mt-7">
-                                    <div className="mb-4 flex items-center justify-between">
-                                        <div className="flex items-center gap-3">
-                                            <h2 className="text-xl font-bold">模型</h2>
-                                            <span className="rounded-full bg-zinc-800 px-2.5 py-1 text-sm text-zinc-400">{models.length}</span>
-                                            <span className="text-zinc-500">⌁</span>
-                                            <span className="text-zinc-500">⌕</span>
+                        <div className="min-h-0 flex-1 space-y-1 overflow-y-auto pr-1">
+                            {visibleProviders.map((provider) => (
+                                <button
+                                    key={provider.id}
+                                    className={`flex w-full items-center gap-3 rounded-2xl px-3 py-2.5 text-left transition ${
+                                        provider.id === selectedProviderId && !isAddingProvider
+                                            ? "border border-zinc-700 bg-zinc-800/70"
+                                            : "hover:bg-zinc-900"
+                                    }`}
+                                    type="button"
+                                    onClick={() => setSelectedProviderId(provider.id)}
+                                >
+                                    <Avatar name={provider.name || provider.id} />
+                                    <span className="min-w-0 flex-1 truncate text-base font-semibold text-zinc-200">{provider.name}</span>
+                                    <span className="rounded-full border border-green-700/60 bg-green-950/70 px-2 py-0.5 text-xs font-bold text-green-400">ON</span>
+                                </button>
+                            ))}
+                        </div>
+
+                        <button
+                            className="mt-3 rounded-xl border border-zinc-700 px-4 py-2.5 text-base font-semibold text-zinc-100 transition hover:bg-zinc-900"
+                            type="button"
+                            onClick={startAddProvider}
+                        >
+                            ＋ 添加
+                        </button>
+                    </aside>
+
+                    <main className="min-w-0 flex-1 overflow-y-auto px-7 py-5">
+                        <div className="mx-auto max-w-7xl">
+                            {(activeProvider || isAddingProvider) ? (
+                                <>
+                                    <div className="mb-4 flex items-center justify-between border-b border-zinc-800 pb-5">
+                                        <div className="flex min-w-0 items-center gap-3">
+                                            <h1 className="truncate text-xl font-bold">{isAddingProvider ? "添加模型平台" : activeProvider?.name || "选择模型平台"}</h1>
+                                            {!isAddingProvider && activeProvider && <span className="rounded-full border border-zinc-700 px-2 py-0.5 text-xs text-zinc-400">ID: {activeProvider.id}</span>}
+                                            {!isAddingProvider && activeProvider && <span className="rounded-full border border-zinc-700 px-2 py-0.5 text-xs text-zinc-400">{activeProvider.type}</span>}
                                         </div>
-                                        <div className="flex overflow-hidden rounded-xl border border-zinc-700">
-                                            <button
-                                                className="px-4 py-2 font-semibold text-zinc-100 hover:bg-zinc-900"
-                                                type="button"
-                                                onClick={() => setMessage("获取模型列表尚未接入上游 API；请先手动添加。")}
-                                            >
-                                                ⟳ 获取模型列表
-                                            </button>
-                                            <button className="border-l border-zinc-700 px-4 py-2 text-xl hover:bg-zinc-900" type="button" onClick={startAddModel}>＋</button>
-                                        </div>
+                                        <button
+                                            className="h-8 w-14 rounded-full bg-emerald-500 p-1"
+                                            type="button"
+                                            onClick={() => setMessage("启用开关暂未落库，后续接入路由开关时启用。")}
+                                            aria-label="平台启用状态"
+                                        >
+                                            <span className="block h-6 w-6 translate-x-6 rounded-full bg-white" />
+                                        </button>
                                     </div>
 
-                                    {showModelForm && (
-                                        <ModelForm
-                                            draft={modelDraft}
-                                            editing={editingModel}
-                                            onChange={(patch) => setModelDraft({...modelDraft, ...patch})}
-                                            onSubmit={saveModel}
-                                            onCancel={() => {
-                                                setShowModelForm(false);
-                                                setEditingModel(false);
-                                            }}
-                                        />
-                                    )}
+                                    <ProviderPanel
+                                        draft={providerDraft}
+                                        isAdding={isAddingProvider}
+                                        presets={providerPresets}
+                                        filteredPresets={filteredPresets}
+                                        selectedPresetId={selectedPresetId}
+                                        showPresetPicker={showPresetPicker}
+                                        presetSearch={presetSearch}
+                                        showKey={showKey}
+                                        onToggleKey={() => setShowKey((value) => !value)}
+                                        onChange={(patch) => setProviderDraft({...providerDraft, ...patch})}
+                                        onApplyPreset={applyProviderPreset}
+                                        onOpenPresetPicker={() => setShowPresetPicker(true)}
+                                        onClosePresetPicker={() => setShowPresetPicker(false)}
+                                        onPresetSearch={setPresetSearch}
+                                        onSubmit={saveProvider}
+                                        onDelete={activeProvider ? () => removeProvider(activeProvider) : null}
+                                        onTest={openProviderTest}
+                                    />
 
-                                    <div className="space-y-4">
-                                        {Object.entries(groupedModels).map(([family, items]) => (
-                                            <ModelGroup key={family} family={family} models={items} onEdit={editModel} onDelete={removeModel} />
-                                        ))}
-                                        {!models.length && (
-                                            <div className="rounded-2xl border border-dashed border-zinc-800 p-10 text-center text-zinc-500">
-                                                这个平台还没有模型。点右上角 ＋ 添加。
+                                    {!isAddingProvider && (
+                                        <section className="mt-7">
+                                            <div className="mb-4 flex items-center justify-between">
+                                                <div className="flex items-center gap-3">
+                                                    <h2 className="text-xl font-bold">模型</h2>
+                                                    <span className="rounded-full bg-zinc-800 px-2.5 py-1 text-sm text-zinc-400">{models.length}</span>
+                                                </div>
+                                                <div className="flex overflow-hidden rounded-xl border border-zinc-700">
+                                                    <button
+                                                        className="px-4 py-2 font-semibold text-zinc-100 hover:bg-zinc-900"
+                                                        type="button"
+                                                        onClick={() => setMessage("获取模型列表尚未接入上游 API；请先手动添加。")}
+                                                    >
+                                                        ⟳ 获取模型列表
+                                                    </button>
+                                                    <button className="border-l border-zinc-700 px-4 py-2 text-xl hover:bg-zinc-900" type="button" onClick={startAddModel}>＋</button>
+                                                </div>
                                             </div>
-                                        )}
-                                    </div>
-                                </section>
+
+                                            <div className="space-y-4">
+                                                {Object.entries(groupedModels).map(([family, items]) => (
+                                                    <ModelGroup key={family} family={family} models={items} onEdit={editModel} onDelete={removeModel} />
+                                                ))}
+                                                {!models.length && (
+                                                    <div className="rounded-2xl border border-dashed border-zinc-800 p-10 text-center text-zinc-500">
+                                                        这个平台还没有模型。点右上角 ＋ 添加。
+                                                    </div>
+                                                )}
+                                            </div>
+                                        </section>
+                                    )}
+                                </>
+                            ) : (
+                                <div className="grid h-[70vh] place-items-center rounded-3xl border border-dashed border-zinc-800 text-zinc-500">
+                                    左侧选择一个模型平台，或点击「添加」创建。
+                                </div>
                             )}
 
-                            <StatsPanel
-                                baseUrl={relayBaseUrl}
-                                stats={stats}
-                                filter={statsFilter}
-                                providers={providers}
-                                onChange={(patch) => setStatsFilter({...statsFilter, ...patch})}
-                                onRefresh={refreshStats}
-                            />
-                        </>
-                    ) : (
-                        <div className="grid h-[70vh] place-items-center rounded-3xl border border-dashed border-zinc-800 text-zinc-500">
-                            左侧选择一个模型平台，或点击「添加」创建。
+                            <StatusMessage message={message} providerCount={providerCount} />
                         </div>
-                    )}
-
-                    <div className="mt-6 rounded-xl border border-zinc-800 bg-zinc-950/50 px-4 py-3 text-sm text-zinc-400">
-                        {message} · 当前平台 {providerCount} 个
-                    </div>
+                    </main>
                 </div>
-            </main>
+            )}
+
+            {showModelForm && (
+                <Modal title={editingModel ? "编辑模型" : "添加模型"} onClose={() => {
+                    setShowModelForm(false);
+                    setEditingModel(false);
+                }}>
+                    <ModelForm
+                        draft={modelDraft}
+                        editing={editingModel}
+                        onChange={(patch) => setModelDraft({...modelDraft, ...patch})}
+                        onSubmit={saveModel}
+                        onCancel={() => {
+                            setShowModelForm(false);
+                            setEditingModel(false);
+                        }}
+                    />
+                </Modal>
+            )}
+            {showProviderTest && activeProvider && (
+                <Modal title="检测 API Key" onClose={() => setShowProviderTest(false)}>
+                    <ProviderTestForm
+                        provider={activeProvider}
+                        models={models.filter((model) => model.enabled !== false)}
+                        modelId={testModelId}
+                        result={testResult}
+                        testing={isTestingProvider}
+                        onModelChange={setTestModelId}
+                        onRun={runProviderTest}
+                    />
+                </Modal>
+            )}
+            {toast && <Toast>{toast}</Toast>}
         </div>
     );
 }
 
-function ProviderPanel({draft, isAdding, presets, selectedPresetId, showKey, onToggleKey, onChange, onApplyPreset, onSubmit, onDelete, onTest}) {
+function ProviderPanel({
+    draft,
+    isAdding,
+    presets,
+    filteredPresets,
+    selectedPresetId,
+    showPresetPicker,
+    presetSearch,
+    showKey,
+    onToggleKey,
+    onChange,
+    onApplyPreset,
+    onOpenPresetPicker,
+    onClosePresetPicker,
+    onPresetSearch,
+    onSubmit,
+    onDelete,
+    onTest,
+}) {
+    const selectedPreset = presets.find((preset) => preset.id === selectedPresetId);
     return (
         <form className="space-y-7" onSubmit={onSubmit}>
             {isAdding && presets.length > 0 && (
-                <div>
-                    <div className="mb-3 flex items-center justify-between">
-                        <h2 className="text-xl font-bold">从预设添加</h2>
-                        <span className="text-sm text-zinc-500">会自动导入常用模型</span>
+                <div className="rounded-2xl border border-zinc-800 bg-zinc-950/30 p-4">
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                        <div>
+                            <h2 className="text-xl font-bold">供应商预设</h2>
+                            <p className="mt-1 text-sm text-zinc-500">选择后会填入地址、类型，并自动导入常用模型。</p>
+                        </div>
+                        <button className="rounded-xl border border-zinc-700 px-4 py-2 font-semibold text-zinc-100 hover:bg-zinc-900" type="button" onClick={onOpenPresetPicker}>
+                            {selectedPreset ? `已选：${selectedPreset.name}` : "选择预设"}
+                        </button>
                     </div>
-                    <div className="grid gap-3 md:grid-cols-4">
-                        {presets.map((preset) => (
-                            <button
-                                key={preset.id}
-                                className={`rounded-2xl border px-4 py-3 text-left transition ${
-                                    selectedPresetId === preset.id
-                                        ? "border-emerald-500 bg-emerald-950/30"
-                                        : "border-zinc-800 bg-zinc-950/40 hover:bg-zinc-900"
-                                }`}
-                                type="button"
-                                onClick={() => onApplyPreset(preset)}
-                            >
-                                <div className="font-bold text-zinc-100">{preset.name}</div>
-                                <div className="mt-1 truncate text-xs text-zinc-500">{preset.baseUrl}</div>
-                                <div className="mt-2 text-xs text-zinc-400">{preset.models?.length || 0} 个模型</div>
-                            </button>
-                        ))}
-                    </div>
+
+                    {showPresetPicker && (
+                        <Modal title="选择供应商预设" onClose={onClosePresetPicker}>
+                            <div className="space-y-4">
+                                <label className="flex items-center gap-2 rounded-xl border border-zinc-700 bg-[#151515] px-3 py-2 text-zinc-500">
+                                    <SearchIcon />
+                                    <input
+                                        className="min-w-0 flex-1 bg-transparent text-sm text-zinc-100 outline-none placeholder:text-zinc-600"
+                                        value={presetSearch}
+                                        onChange={(event) => onPresetSearch(event.target.value)}
+                                        placeholder="搜索名称、类型、地址或模型..."
+                                        autoFocus
+                                    />
+                                </label>
+
+                                <div className="max-h-[60vh] space-y-3 overflow-y-auto pr-1">
+                                    {filteredPresets.map((preset) => (
+                                        <button
+                                            key={preset.id}
+                                            className={`w-full rounded-2xl border p-4 text-left transition ${
+                                                selectedPresetId === preset.id
+                                                    ? "border-emerald-500 bg-emerald-950/30"
+                                                    : "border-zinc-800 bg-zinc-950/40 hover:bg-zinc-900"
+                                            }`}
+                                            type="button"
+                                            onClick={() => onApplyPreset(preset)}
+                                        >
+                                            <div className="flex flex-wrap items-start justify-between gap-3">
+                                                <div>
+                                                    <div className="text-lg font-bold text-zinc-100">{preset.name}</div>
+                                                    <div className="mt-1 text-xs text-zinc-500">{preset.id} · {preset.type}</div>
+                                                </div>
+                                                <span className="rounded-full bg-zinc-800 px-2.5 py-1 text-xs text-zinc-400">{preset.models?.length || 0} 个模型</span>
+                                            </div>
+                                            <div className="mt-3 rounded-xl bg-black/20 px-3 py-2 font-mono text-xs text-zinc-400">{preset.baseUrl}</div>
+                                            <div className="mt-3 flex flex-wrap gap-2">
+                                                {(preset.models || []).slice(0, 5).map((model) => (
+                                                    <span key={model.id} className="rounded-full border border-zinc-800 px-2 py-1 text-xs text-zinc-400">{model.name || model.id}</span>
+                                                ))}
+                                            </div>
+                                        </button>
+                                    ))}
+                                    {!filteredPresets.length && <div className="rounded-2xl border border-dashed border-zinc-800 p-8 text-center text-zinc-500">没有匹配的预设。</div>}
+                                </div>
+                            </div>
+                        </Modal>
+                    )}
                 </div>
             )}
 
@@ -414,7 +606,7 @@ function ProviderPanel({draft, isAdding, presets, selectedPresetId, showKey, onT
             <div>
                 <div className="mb-3 flex items-center justify-between">
                     <h2 className="text-xl font-bold">API 密钥</h2>
-                    <span className="text-xl text-zinc-400">⌘</span>
+                    <span className="text-sm text-zinc-500">本地加密存储</span>
                 </div>
                 <div className="flex overflow-hidden rounded-xl border border-zinc-700 bg-[#151515]">
                     <input
@@ -424,7 +616,9 @@ function ProviderPanel({draft, isAdding, presets, selectedPresetId, showKey, onT
                         onChange={(event) => onChange({apiKey: event.target.value})}
                         placeholder="sk-..."
                     />
-                    <button className="border-l border-zinc-700 px-4 text-zinc-400 hover:bg-zinc-900" type="button" onClick={onToggleKey}>⌧</button>
+                    <button className="border-l border-zinc-700 px-4 text-zinc-400 hover:bg-zinc-900" type="button" onClick={onToggleKey} aria-label={showKey ? "隐藏 API 密钥" : "显示 API 密钥"}>
+                        {showKey ? <EyeOffIcon /> : <EyeIcon />}
+                    </button>
                     <button className="border-l border-zinc-700 px-5 font-bold hover:bg-zinc-900" type="button" onClick={onTest}>检测</button>
                 </div>
                 <p className="mt-2 text-right text-sm text-zinc-500">多个密钥使用逗号分隔</p>
@@ -432,8 +626,8 @@ function ProviderPanel({draft, isAdding, presets, selectedPresetId, showKey, onT
 
             <div>
                 <div className="mb-3 flex items-center justify-between">
-                    <h2 className="text-xl font-bold">API 地址 <span className="text-sm text-zinc-500">ⓘ</span></h2>
-                    <span className="text-xl text-zinc-400">⌘</span>
+                    <h2 className="text-xl font-bold">API 地址</h2>
+                    <span className="text-sm text-zinc-500">OpenAI 兼容入口通常以 /v1 结尾</span>
                 </div>
                 <input
                     className="w-full rounded-xl border border-zinc-700 bg-[#151515] px-4 py-3 text-lg outline-none placeholder:text-zinc-600"
@@ -444,15 +638,7 @@ function ProviderPanel({draft, isAdding, presets, selectedPresetId, showKey, onT
                 <p className="mt-2 text-sm text-zinc-500">预览：{previewChatUrl(draft.baseUrl)}</p>
             </div>
 
-            <label className="grid gap-1 text-sm font-semibold text-zinc-300">
-                差异兼容配置 JSON
-                <textarea
-                    className="min-h-32 rounded-xl border border-zinc-700 bg-[#151515] px-3 py-2.5 font-mono text-xs text-zinc-100 outline-none placeholder:text-zinc-600"
-                    value={draft.capabilityConfig}
-                    onChange={(event) => onChange({capabilityConfig: event.target.value})}
-                    placeholder='{"protocol":"openai_chat"}'
-                />
-            </label>
+            <ProviderCapabilityEditor value={draft.capabilityConfig} onChange={(capabilityConfig) => onChange({capabilityConfig})} />
 
             <div className="flex gap-3">
                 <button className="rounded-xl bg-zinc-100 px-5 py-2.5 font-bold text-zinc-950 hover:bg-white" type="submit">
@@ -470,21 +656,73 @@ function ProviderPanel({draft, isAdding, presets, selectedPresetId, showKey, onT
 
 function ModelForm({draft, editing, onChange, onSubmit, onCancel}) {
     return (
-        <form className="mb-4 grid gap-3 rounded-2xl border border-zinc-800 bg-zinc-900/40 p-4 md:grid-cols-3" onSubmit={onSubmit}>
-            <Field label="模型 ID" value={draft.id} disabled={editing} onChange={(id) => onChange({id})} placeholder="gemini-3-flash-preview" />
-            <Field label="显示名称" value={draft.name} onChange={(name) => onChange({name})} placeholder="gemini-3-flash-preview" />
-            <Field label="能力 JSON" value={draft.capabilities} onChange={(capabilities) => onChange({capabilities})} placeholder='{"tools":true}' />
-            <Field label="上下文长度" type="number" value={draft.contextLength} onChange={(contextLength) => onChange({contextLength})} />
-            <Field label="Max Tokens" type="number" value={draft.maxTokens} onChange={(maxTokens) => onChange({maxTokens})} />
-            <label className="flex items-end gap-2 pb-2 text-sm font-semibold text-zinc-300">
+        <form className="space-y-5" onSubmit={onSubmit}>
+            <div className="grid gap-3 md:grid-cols-2">
+                <Field label="模型 ID" value={draft.id} disabled={editing} onChange={(id) => onChange({id})} placeholder="gemini-3-flash-preview" />
+                <Field label="显示名称" value={draft.name} onChange={(name) => onChange({name})} placeholder="gemini-3-flash-preview" />
+                <Field label="上下文长度" type="number" value={draft.contextLength} onChange={(contextLength) => onChange({contextLength})} />
+                <Field label="Max Tokens" type="number" value={draft.maxTokens} onChange={(maxTokens) => onChange({maxTokens})} />
+            </div>
+
+            <ModelCapabilityEditor value={draft.capabilities} onChange={(capabilities) => onChange({capabilities})} />
+
+            <label className="flex items-center gap-2 text-sm font-semibold text-zinc-300">
                 <input type="checkbox" checked={draft.enabled !== false} onChange={(event) => onChange({enabled: event.target.checked})} />
                 对外提供
             </label>
-            <div className="flex items-end gap-2">
-                <button className="rounded-xl bg-zinc-100 px-4 py-2 font-bold text-zinc-950" type="submit">{editing ? "更新" : "添加"}</button>
+
+            <div className="flex justify-end gap-2 border-t border-zinc-800 pt-4">
                 <button className="rounded-xl border border-zinc-700 px-4 py-2 font-bold text-zinc-300" type="button" onClick={onCancel}>取消</button>
+                <button className="rounded-xl bg-zinc-100 px-4 py-2 font-bold text-zinc-950" type="submit">{editing ? "更新" : "添加"}</button>
             </div>
         </form>
+    );
+}
+
+function ProviderTestForm({provider, models, modelId, result, testing, onModelChange, onRun}) {
+    return (
+        <div className="space-y-4">
+            <div className="rounded-2xl border border-zinc-800 bg-zinc-950/30 p-4 text-sm text-zinc-400">
+                <div className="font-semibold text-zinc-200">{provider.name}</div>
+                <div className="mt-1 font-mono text-xs">provider id: {provider.id}</div>
+                <div className="mt-2">会向所选上游模型发送测试消息：<span className="text-zinc-200">Reply with OK.</span></div>
+            </div>
+
+            <SelectField
+                label="选择测试模型"
+                value={modelId}
+                onChange={onModelChange}
+                options={models.map((model) => [model.id, `${model.name || model.id} (${provider.id}/${model.id})`])}
+            />
+
+            {result && (
+                <div className={`rounded-2xl border p-4 ${result.ok ? "border-emerald-800 bg-emerald-950/30" : "border-red-900 bg-red-950/30"}`}>
+                    <div className={`font-bold ${result.ok ? "text-emerald-300" : "text-red-300"}`}>
+                        {result.ok ? "检测通过" : "检测失败"}
+                    </div>
+                    {result.ok ? (
+                        <div className="mt-2 space-y-1 text-sm text-zinc-300">
+                            <div>模型：{result.model}</div>
+                            <div>耗时：{result.latencyMs} ms</div>
+                            <div>回复：{result.content || "（无文本内容）"}</div>
+                        </div>
+                    ) : (
+                        <pre className="mt-2 whitespace-pre-wrap text-sm text-red-100">{result.error}</pre>
+                    )}
+                </div>
+            )}
+
+            <div className="flex justify-end border-t border-zinc-800 pt-4">
+                <button
+                    className="rounded-xl bg-zinc-100 px-5 py-2.5 font-bold text-zinc-950 disabled:cursor-wait disabled:opacity-60"
+                    type="button"
+                    disabled={testing || !modelId}
+                    onClick={onRun}
+                >
+                    {testing ? "检测中…" : "发送测试消息"}
+                </button>
+            </div>
+        </div>
     );
 }
 
@@ -493,15 +731,15 @@ function ModelGroup({family, models, onEdit, onDelete}) {
         <div className="overflow-hidden rounded-2xl border border-zinc-800">
             <div className="flex items-center justify-between bg-zinc-800/70 px-6 py-4">
                 <div className="flex items-center gap-4">
-                    <span className="text-zinc-500">⌄</span>
+                    <span className="text-zinc-500">模型组</span>
                     <h3 className="text-xl font-bold">{family}</h3>
                 </div>
-                <span className="text-xl text-zinc-400">-</span>
+                <span className="text-sm text-zinc-400">{models.length} 个</span>
             </div>
             <div className="divide-y divide-zinc-900 bg-[#151515]">
                 {models.map((model) => (
                     <div key={`${model.providerId}/${model.id}`} className="flex items-center gap-4 px-6 py-4">
-                        <span className="text-2xl">✦</span>
+                        <span className="grid h-9 w-9 place-items-center rounded-full bg-zinc-800 text-sm text-zinc-400">AI</span>
                         <div className="min-w-0 flex-1">
                             <div className="truncate text-xl font-semibold">{model.name || model.id}</div>
                             <div className="text-xs text-zinc-500">context {model.contextLength || 0} · max {model.maxTokens || 0} · route {model.providerId}/{model.id}</div>
@@ -510,8 +748,8 @@ function ModelGroup({family, models, onEdit, onDelete}) {
                             {model.enabled !== false ? "OPEN" : "OFF"}
                         </span>
                         <CapabilityPills value={model.capabilities} />
-                        <button className="text-zinc-400 hover:text-zinc-100" type="button" onClick={() => onEdit(model)}>◎</button>
-                        <button className="text-xl text-zinc-400 hover:text-red-300" type="button" onClick={() => onDelete(model)}>-</button>
+                        <button className="rounded-lg border border-zinc-700 px-3 py-1.5 text-sm text-zinc-300 hover:bg-zinc-900" type="button" onClick={() => onEdit(model)}>编辑</button>
+                        <button className="rounded-lg border border-red-900/70 px-3 py-1.5 text-sm text-red-300 hover:bg-red-950/40" type="button" onClick={() => onDelete(model)}>删除</button>
                     </div>
                 ))}
             </div>
@@ -519,8 +757,9 @@ function ModelGroup({family, models, onEdit, onDelete}) {
     );
 }
 
-function StatsPanel({baseUrl, stats, filter, providers, onChange, onRefresh}) {
+function StatsPanel({baseUrl, stats, filter, providers, modelOptions, onChange, onRefresh}) {
     const points = stats.points || [];
+    const nonCacheInputTokens = nonCacheInput(stats);
     return (
         <section className="mt-7 rounded-2xl border border-zinc-800 bg-zinc-950/30 p-5">
             <div className="mb-4 flex flex-wrap items-end justify-between gap-3">
@@ -538,7 +777,12 @@ function StatsPanel({baseUrl, stats, filter, providers, onChange, onRefresh}) {
                             {providers.map((provider) => <option key={provider.id} value={provider.id}>{provider.name}</option>)}
                         </select>
                     </label>
-                    <Field label="模型 ID" value={filter.modelId} onChange={(modelId) => onChange({modelId})} placeholder="gpt-4.1-mini" />
+                    <SelectField
+                        label="模型 ID"
+                        value={filter.modelId}
+                        onChange={(modelId) => onChange({modelId})}
+                        options={[["", modelOptions.length ? "全部" : "暂无记录"], ...modelOptions.map((model) => [model, model])]}
+                    />
                     <button className="rounded-xl bg-zinc-100 px-4 py-2.5 font-bold text-zinc-950" type="button" onClick={onRefresh}>刷新</button>
                 </div>
             </div>
@@ -547,7 +791,7 @@ function StatsPanel({baseUrl, stats, filter, providers, onChange, onRefresh}) {
                 <StatCard label="调用" value={stats.calls || 0} />
                 <StatCard label="输入" value={stats.inputTokens || 0} />
                 <StatCard label="输出" value={stats.outputTokens || 0} />
-                <StatCard label="缓存写入" value={stats.cacheCreationInputTokens || 0} />
+                <StatCard label="未命中输入" value={nonCacheInputTokens} />
                 <StatCard label="缓存命中" value={stats.cacheReadInputTokens || 0} />
             </div>
 
@@ -601,13 +845,16 @@ function TokenTrendChart({points}) {
 }
 
 function tokenParts(point) {
-    const cache = (point.cacheCreationInputTokens || 0) + (point.cacheReadInputTokens || 0);
     return [
-        {name: "input", value: Math.max(0, (point.inputTokens || 0) - cache), color: "#10b981"},
+        {name: "input", value: nonCacheInput(point), color: "#10b981"},
         {name: "output", value: point.outputTokens || 0, color: "#0ea5e9"},
         {name: "cacheCreate", value: point.cacheCreationInputTokens || 0, color: "#f59e0b"},
         {name: "cacheRead", value: point.cacheReadInputTokens || 0, color: "#8b5cf6"},
     ].filter((part) => part.value > 0);
+}
+
+function nonCacheInput(point) {
+    return Math.max(0, (point.inputTokens || 0) - (point.cacheCreationInputTokens || 0) - (point.cacheReadInputTokens || 0));
 }
 
 function tokenTotal(point) {
@@ -632,18 +879,196 @@ function StatCard({label, value}) {
     );
 }
 
+function StatusMessage({message, providerCount}) {
+    return (
+        <div className="mt-6 rounded-xl border border-zinc-800 bg-zinc-950/50 px-4 py-3 text-sm text-zinc-400">
+            {message} · 当前平台 {providerCount} 个
+        </div>
+    );
+}
+
+function ProviderCapabilityEditor({value, onChange}) {
+    const cfg = parseJsonObject(value, {protocol: "openai_chat"});
+    const thinking = cfg.thinking || {};
+    const reasoningEffort = cfg.reasoningEffort || {};
+    const toolCalls = cfg.toolCalls || {};
+    const preview = formatJSON(cleanProviderCapability(cfg));
+
+    function update(patch) {
+        onChange(formatJSON(cleanProviderCapability({...cfg, ...patch})));
+    }
+
+    function updateThinking(patch) {
+        update({thinking: {...thinking, ...patch}});
+    }
+
+    function updateReasoning(patch) {
+        update({reasoningEffort: {...reasoningEffort, ...patch}});
+    }
+
+    return (
+        <details className="rounded-2xl border border-zinc-800 bg-zinc-950/30">
+            <summary className="flex cursor-pointer list-none flex-wrap items-center justify-between gap-3 px-4 py-4">
+                <div>
+                    <h2 className="text-xl font-bold">提供商属性配置</h2>
+                    <p className="mt-1 text-sm text-zinc-500">默认折叠。展开后用选项描述协议差异。</p>
+                </div>
+                <span className="rounded-full bg-zinc-800 px-2.5 py-1 text-xs text-zinc-400">{cfg.protocol || "openai_chat"}</span>
+            </summary>
+
+            <div className="space-y-4 border-t border-zinc-800 p-4">
+                <div className="grid gap-4 md:grid-cols-2">
+                    <SelectField
+                        label="上游协议"
+                        value={cfg.protocol || "openai_chat"}
+                        onChange={(protocol) => update({protocol})}
+                        options={[["openai_chat", "OpenAI Chat Completions"]]}
+                    />
+                    <SelectField
+                        label="推理强度字段"
+                        value={reasoningEffort.field || ""}
+                        onChange={(field) => updateReasoning({field})}
+                        options={[["", "不转发"], ["reasoning_effort", "reasoning_effort"]]}
+                    />
+                    <SelectField
+                        label="历史思考字段"
+                        value={thinking.requestMessageField || ""}
+                        onChange={(requestMessageField) => updateThinking({requestMessageField})}
+                        options={[["", "不映射"], ["reasoning_content", "reasoning_content"]]}
+                    />
+                    <SelectField
+                        label="响应思考字段"
+                        value={thinking.responseContentField || ""}
+                        onChange={(responseContentField) => updateThinking({responseContentField})}
+                        options={[["", "不映射"], ["reasoning_content", "reasoning_content"]]}
+                    />
+                </div>
+
+                <MultiCheckField
+                    label="思考请求字段"
+                    values={thinking.requestFields || []}
+                    options={thinkingRequestFieldOptions}
+                    onChange={(requestFields) => updateThinking({requestFields})}
+                />
+
+                <MultiCheckField
+                    label="允许的推理强度"
+                    values={reasoningEffort.values || []}
+                    options={reasoningValueOptions}
+                    onChange={(values) => updateReasoning({values})}
+                />
+
+                <ReasoningMapField
+                    valueMap={reasoningEffort.valueMap || {}}
+                    onChange={(valueMap) => updateReasoning({valueMap})}
+                />
+
+                <label className="flex items-center gap-2 text-sm font-semibold text-zinc-300">
+                    <input
+                        type="checkbox"
+                        checked={toolCalls.requireAssistantContent === true}
+                        onChange={(event) => update({toolCalls: {requireAssistantContent: event.target.checked}})}
+                    />
+                    工具调用时补齐 assistant content
+                </label>
+
+                <details className="rounded-xl border border-zinc-800 bg-black/20">
+                    <summary className="cursor-pointer px-4 py-3 text-sm font-semibold text-zinc-300">查看最终 JSON 配置</summary>
+                    <JsonPreview value={preview} />
+                </details>
+            </div>
+        </details>
+    );
+}
+
+function ModelCapabilityEditor({value, onChange}) {
+    const cfg = parseJsonObject(value, {});
+    const preview = formatJSON(cleanObject(cfg));
+
+    function toggle(key, checked) {
+        onChange(formatJSON(cleanObject({...cfg, [key]: checked})));
+    }
+
+    return (
+        <section className="rounded-2xl border border-zinc-800 bg-zinc-950/30 p-4">
+            <h3 className="text-base font-bold">模型能力配置</h3>
+            <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                <CheckField label="支持工具调用" checked={cfg.tools === true} onChange={(checked) => toggle("tools", checked)} />
+                <CheckField label="支持流式输出" checked={cfg.stream === true} onChange={(checked) => toggle("stream", checked)} />
+                <CheckField label="支持视觉输入" checked={cfg.vision === true || cfg.image === true} onChange={(checked) => toggle("vision", checked)} />
+                <CheckField label="支持思考模式" checked={cfg.thinking === true} onChange={(checked) => toggle("thinking", checked)} />
+            </div>
+            <details className="mt-4 rounded-xl border border-zinc-800 bg-black/20">
+                <summary className="cursor-pointer px-4 py-3 text-sm font-semibold text-zinc-300">查看最终 JSON 配置</summary>
+                <JsonPreview value={preview} />
+            </details>
+        </section>
+    );
+}
+
+function JsonPreview({value}) {
+    return (
+        <pre className="overflow-auto px-4 pb-4 font-mono text-xs leading-6 text-zinc-300">
+            {value.split("\n").map((line, index) => {
+                const [key, rest] = line.split(/:(.*)/s);
+                const isKey = key.includes("\"") && rest !== undefined;
+                return (
+                    <span key={`${index}-${line}`} className="block">
+                        {isKey ? <><span className="text-sky-300">{key}</span><span className="text-zinc-500">:</span><span className="text-emerald-300">{rest}</span></> : line}
+                    </span>
+                );
+            })}
+        </pre>
+    );
+}
+
+function Modal({title, children, onClose}) {
+    return (
+        <div className="fixed inset-0 z-50 grid place-items-center bg-black/70 p-4" role="dialog" aria-modal="true">
+            <div className="max-h-[90vh] w-full max-w-3xl overflow-y-auto rounded-3xl border border-zinc-800 bg-[#151515] p-5 shadow-2xl">
+                <div className="mb-4 flex items-center justify-between gap-3 border-b border-zinc-800 pb-4">
+                    <h2 className="text-xl font-bold">{title}</h2>
+                    <button className="rounded-xl border border-zinc-700 px-3 py-1.5 text-sm text-zinc-300 hover:bg-zinc-900" type="button" onClick={onClose}>关闭</button>
+                </div>
+                {children}
+            </div>
+        </div>
+    );
+}
+
+function Toast({children}) {
+    return (
+        <div className="fixed bottom-6 right-6 z-50 rounded-2xl border border-emerald-700/60 bg-emerald-950 px-5 py-3 font-semibold text-emerald-100 shadow-2xl">
+            {children}
+        </div>
+    );
+}
+
+function NavButton({active, onClick, children}) {
+    return (
+        <button
+            className={`rounded-xl px-3 py-2 text-sm font-semibold transition ${active ? "bg-zinc-100 text-zinc-950" : "border border-zinc-800 text-zinc-300 hover:bg-zinc-900"}`}
+            type="button"
+            onClick={onClick}
+        >
+            {children}
+        </button>
+    );
+}
+
 function CapabilityPills({value}) {
-    const text = value || "";
+    const cfg = parseJsonObject(value, {});
     const pills = [
-        ["👁", true, "bg-emerald-950 text-emerald-400"],
-        ["🌐", text.includes("vision") || text.includes("image"), "bg-blue-950 text-blue-400"],
-        ["☀", text.includes("stream"), "bg-indigo-950 text-indigo-300"],
-        ["🔧", text.includes("tool") || text.includes("function"), "bg-orange-950 text-orange-400"],
+        ["启用", true, "bg-emerald-950 text-emerald-400"],
+        ["视觉", cfg.vision === true || cfg.image === true, "bg-blue-950 text-blue-400"],
+        ["流式", cfg.stream === true, "bg-indigo-950 text-indigo-300"],
+        ["工具", cfg.tools === true || cfg.functions === true, "bg-orange-950 text-orange-400"],
+        ["思考", cfg.thinking === true, "bg-violet-950 text-violet-300"],
     ];
     return (
         <div className="hidden gap-2 md:flex">
-            {pills.filter(([, show]) => show).map(([icon,, color]) => (
-                <span key={icon} className={`rounded-full px-3 py-1 text-xs ${color}`}>{icon}</span>
+            {pills.filter(([, show]) => show).map(([label,, color]) => (
+                <span key={label} className={`rounded-full px-3 py-1 text-xs ${color}`}>{label}</span>
             ))}
         </div>
     );
@@ -662,6 +1087,73 @@ function Field({label, value, onChange, type = "text", disabled = false, placeho
                 onChange={(event) => onChange(event.target.value)}
             />
         </label>
+    );
+}
+
+function SelectField({label, value, onChange, options}) {
+    return (
+        <label className="grid gap-1 text-sm font-semibold text-zinc-300">
+            {label}
+            <select
+                className="rounded-xl border border-zinc-700 bg-[#151515] px-3 py-2.5 text-zinc-100 outline-none"
+                value={value}
+                onChange={(event) => onChange(event.target.value)}
+            >
+                {options.map(([optionValue, label]) => <option key={optionValue} value={optionValue}>{label}</option>)}
+            </select>
+        </label>
+    );
+}
+
+function CheckField({label, checked, onChange}) {
+    return (
+        <label className="flex items-center gap-2 rounded-xl border border-zinc-800 bg-[#151515] px-3 py-2.5 text-sm font-semibold text-zinc-300">
+            <input type="checkbox" checked={checked} onChange={(event) => onChange(event.target.checked)} />
+            {label}
+        </label>
+    );
+}
+
+function MultiCheckField({label, values, options, onChange}) {
+    function toggle(option, checked) {
+        onChange(checked ? [...values, option] : values.filter((value) => value !== option));
+    }
+
+    return (
+        <div className="grid gap-2 text-sm font-semibold text-zinc-300">
+            {label}
+            <div className="flex flex-wrap gap-2">
+                {options.map((option) => (
+                    <label key={option} className="flex items-center gap-2 rounded-xl border border-zinc-800 bg-[#151515] px-3 py-2 text-xs text-zinc-300">
+                        <input type="checkbox" checked={values.includes(option)} onChange={(event) => toggle(option, event.target.checked)} />
+                        {option}
+                    </label>
+                ))}
+            </div>
+        </div>
+    );
+}
+
+function ReasoningMapField({valueMap, onChange}) {
+    function update(from, to) {
+        onChange(cleanObject({...valueMap, [from]: to}));
+    }
+
+    return (
+        <div className="grid gap-2 text-sm font-semibold text-zinc-300">
+            推理强度映射
+            <div className="grid gap-2 md:grid-cols-3">
+                {reasoningMapSources.map((from) => (
+                    <SelectField
+                        key={from}
+                        label={`${from} 映射为`}
+                        value={valueMap[from] || ""}
+                        onChange={(to) => update(from, to)}
+                        options={[["", "不映射"], ...reasoningValueOptions.map((value) => [value, value])]}
+                    />
+                ))}
+            </div>
+        </div>
     );
 }
 
@@ -703,6 +1195,69 @@ function daysAgo(days) {
     const date = new Date();
     date.setDate(date.getDate() - days);
     return date.toISOString().slice(0, 10);
+}
+
+function SearchIcon() {
+    return (
+        <svg className="h-4 w-4 shrink-0" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+            <circle cx="9" cy="9" r="5.5" stroke="currentColor" strokeWidth="1.8" />
+            <path d="M13 13l3.5 3.5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+        </svg>
+    );
+}
+
+function EyeIcon() {
+    return (
+        <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" />
+            <circle cx="12" cy="12" r="3" stroke="currentColor" strokeWidth="1.8" />
+        </svg>
+    );
+}
+
+function EyeOffIcon() {
+    return (
+        <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <path d="M3 3l18 18" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+            <path d="M10.6 5.2A9.8 9.8 0 0 1 12 5c6 0 9.5 7 9.5 7a16.8 16.8 0 0 1-3 3.7M6.7 6.8C4 8.5 2.5 12 2.5 12s3.5 7 9.5 7c1.4 0 2.7-.4 3.8-1" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+            <path d="M9.9 9.9A3 3 0 0 0 14.1 14.1" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+        </svg>
+    );
+}
+
+function parseJsonObject(value, fallback) {
+    try {
+        const parsed = JSON.parse(value || "{}");
+        return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : fallback;
+    } catch {
+        return fallback;
+    }
+}
+
+function formatJSON(value) {
+    return JSON.stringify(value, null, 2);
+}
+
+function cleanProviderCapability(cfg) {
+    return cleanObject({
+        ...cfg,
+        protocol: cfg.protocol || "openai_chat",
+        thinking: cleanObject(cfg.thinking || {}),
+        reasoningEffort: cleanObject({
+            ...(cfg.reasoningEffort || {}),
+            valueMap: cleanObject(cfg.reasoningEffort?.valueMap || {}),
+        }),
+        toolCalls: cleanObject(cfg.toolCalls || {}),
+    });
+}
+
+function cleanObject(value) {
+    return Object.fromEntries(Object.entries(value || {}).filter(([, item]) => {
+        if (item === "" || item === undefined || item === null || item === false) return false;
+        if (Array.isArray(item)) return item.length > 0;
+        if (typeof item === "object") return Object.keys(item).length > 0;
+        return true;
+    }));
 }
 
 export default App

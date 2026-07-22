@@ -38,6 +38,14 @@ export function RelayBaseURL() {
   return window['go']['main']['App']['RelayBaseURL']();
 }
 
+export function TestProviderModel(arg1, arg2) {
+  return window['go']['main']['App']['TestProviderModel'](arg1, arg2);
+}
+
+export function TokenStatModels(arg1) {
+  return window['go']['main']['App']['TokenStatModels'](arg1);
+}
+
 export function TokenStats(arg1) {
   return window['go']['main']['App']['TokenStats'](arg1);
 }

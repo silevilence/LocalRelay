@@ -258,6 +258,32 @@ func TestProviderResponseRoundTripsThroughIR(t *testing.T) {
 	}
 }
 
+func TestDeepSeekUsageCacheTokens(t *testing.T) {
+	resp, err := ParseResponse([]byte(`{
+		"model":"deepseek-v4-pro",
+		"choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],
+		"usage":{"completion_tokens":1247,"prompt_tokens":1835,"prompt_cache_hit_tokens":768,"prompt_cache_miss_tokens":1067,"total_tokens":3082}
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Usage.InputTokens != 1835 || resp.Usage.OutputTokens != 1247 || resp.Usage.CacheReadInputTokens != 768 {
+		t.Fatalf("usage = %#v", resp.Usage)
+	}
+
+	resp, err = ParseResponse([]byte(`{
+		"model":"deepseek-v4-pro",
+		"choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],
+		"usage":{"completion_tokens":1,"prompt_cache_hit_tokens":2,"prompt_cache_miss_tokens":3}
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Usage.InputTokens != 5 || resp.Usage.CacheReadInputTokens != 2 {
+		t.Fatalf("fallback usage = %#v", resp.Usage)
+	}
+}
+
 func TestCompatibilityWrappers(t *testing.T) {
 	resp, err := (Response{
 		Model: "m",

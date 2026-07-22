@@ -1,3 +1,24 @@
+export namespace main {
+	
+	export class ProviderTestResult {
+	    model: string;
+	    content: string;
+	    latencyMs: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new ProviderTestResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.model = source["model"];
+	        this.content = source["content"];
+	        this.latencyMs = source["latencyMs"];
+	    }
+	}
+
+}
+
 export namespace store {
 	
 	export class Model {
