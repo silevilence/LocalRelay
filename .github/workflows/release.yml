@@ -1,0 +1,116 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+      - "V*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    name: Build Windows installers
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Parse version
+        id: version
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          if ($tag -notmatch '^[vV](\d+\.\d+\.\d+)$') {
+            throw "Release tag must look like v0.1.0 or V0.1.0: $tag"
+          }
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+          "version=$($Matches[1])" >> $env:GITHUB_OUTPUT
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install NSIS
+        shell: pwsh
+        run: choco install nsis -y --no-progress
+
+      - name: Install Wails
+        shell: pwsh
+        run: |
+          go install github.com/wailsapp/wails/v2/cmd/wails@v2.13.0
+          Join-Path (go env GOPATH) "bin" >> $env:GITHUB_PATH
+
+      - name: Build user and machine installers
+        shell: pwsh
+        run: .\build.ps1 -InstallScope both -Version "${{ steps.version.outputs.version }}"
+
+      - name: Create checksums
+        shell: pwsh
+        run: |
+          $version = "${{ steps.version.outputs.version }}"
+          $bin = Join-Path $PWD "build\bin"
+          $files = @(
+            Join-Path $bin "LocalRelay-$version-user-amd64-installer.exe"
+            Join-Path $bin "LocalRelay-$version-machine-amd64-installer.exe"
+          )
+          foreach ($file in $files) {
+            if (-not (Test-Path -LiteralPath $file)) {
+              throw "Missing installer: $file"
+            }
+          }
+          $lines = foreach ($file in $files) {
+            $hash = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $(Split-Path -Leaf $file)"
+          }
+          $lines | Set-Content -LiteralPath (Join-Path $bin "checksums.txt") -Encoding utf8
+
+      - name: Extract release body
+        shell: pwsh
+        run: |
+          $tag = "${{ steps.version.outputs.tag }}"
+          $version = "${{ steps.version.outputs.version }}"
+          $bodyPath = Join-Path $env:RUNNER_TEMP "release-body.md"
+          $body = ""
+
+          if (Test-Path -LiteralPath "changelog.md") {
+            $content = Get-Content -LiteralPath "changelog.md" -Raw
+            $pattern = "(?ims)^##\s*[vV]$([regex]::Escape($version))\s*\r?\n(?<body>.*?)(?=^##\s|\z)"
+            $match = [regex]::Match($content, $pattern)
+            if ($match.Success) {
+              $body = $match.Groups["body"].Value.Trim()
+            } else {
+              Write-Warning "No changelog section found for $tag; using tag name as release body."
+            }
+          } else {
+            Write-Warning "changelog.md not found; using tag name as release body."
+          }
+
+          if ([string]::IsNullOrWhiteSpace($body)) {
+            $body = $tag
+          }
+
+          $body | Set-Content -LiteralPath $bodyPath -Encoding utf8
+          "RELEASE_BODY=$bodyPath" >> $env:GITHUB_ENV
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: LocalRelay ${{ steps.version.outputs.tag }}
+          body_path: ${{ env.RELEASE_BODY }}
+          files: |
+            build/bin/LocalRelay-${{ steps.version.outputs.version }}-user-amd64-installer.exe
+            build/bin/LocalRelay-${{ steps.version.outputs.version }}-machine-amd64-installer.exe
+            build/bin/checksums.txt
