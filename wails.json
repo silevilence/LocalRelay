@@ -9,5 +9,12 @@
   "author": {
     "name": "silevilence",
     "email": "silevilence@outlook.com"
+  },
+  "info": {
+    "companyName": "LocalRelay",
+    "productName": "LocalRelay",
+    "productVersion": "0.1.0",
+    "copyright": "Copyright (c) 2026 silevilence",
+    "comments": "Local LLM relay and gateway desktop app"
   }
 }
