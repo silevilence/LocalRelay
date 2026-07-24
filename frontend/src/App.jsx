@@ -1,7 +1,9 @@
 import {useEffect, useMemo, useRef, useState} from 'react';
 import * as echarts from 'echarts';
 import {
+    AppInfo,
     CallLogs,
+    CheckForUpdate,
     CreateAPIKey,
     CreateModel,
     CreateProvider,
@@ -18,11 +20,13 @@ import {
     TokenStatRows,
     TokenStats,
     TokenTrend,
+    InstallUpdate,
     TestProviderModel,
     UpdateAPIKey,
     UpdateModel,
     UpdateProvider,
 } from "../wailsjs/go/main/App";
+import {EventsOn} from "../wailsjs/runtime/runtime";
 
 const emptyProvider = {id: "", name: "", type: "openai", baseUrl: "", apiKey: "", capabilityConfig: ""};
 const emptyModel = {id: "", providerId: "", name: "", capabilities: "", contextLength: 0, maxTokens: 0, enabled: true};
@@ -45,6 +49,7 @@ const providerTypeOptions = [
     ["gemini", "Google Gemini"],
     ["openai-responses", "OpenAI Responses"],
 ];
+const skippedUpdateKey = "localrelay.skippedUpdateVersion";
 
 function App() {
     const [providers, setProviders] = useState([]);
@@ -87,6 +92,12 @@ function App() {
     const [statsGrain, setStatsGrain] = useState("day");
     const [statsStackBy, setStatsStackBy] = useState("app");
     const [statsMetric, setStatsMetric] = useState("total");
+    const [appInfo, setAppInfo] = useState({version: "", releaseRepo: "", installScope: "user"});
+    const [updateInfo, setUpdateInfo] = useState(null);
+    const [checkingUpdate, setCheckingUpdate] = useState(false);
+    const [installingUpdate, setInstallingUpdate] = useState(false);
+    const [updateProgress, setUpdateProgress] = useState(null);
+    const [showUpdatePrompt, setShowUpdatePrompt] = useState(false);
 
     const selectedProvider = useMemo(
         () => providers.find((provider) => provider.id === selectedProviderId),
@@ -128,6 +139,12 @@ function App() {
         refreshAPIKeys();
         ListProviderPresets().then((items) => setProviderPresets(items || [])).catch(() => {});
         RelayBaseURL().then(setRelayBaseUrl).catch(() => {});
+        AppInfo().then(setAppInfo).catch(() => {});
+        checkUpdates(false);
+    }, []);
+
+    useEffect(() => {
+        return EventsOn("update-progress", (progress) => setUpdateProgress(progress || null));
     }, []);
 
     useEffect(() => {
@@ -423,6 +440,43 @@ function App() {
         }
     }
 
+    async function checkUpdates(manual = true) {
+        if (manual) setCheckingUpdate(true);
+        try {
+            const info = await CheckForUpdate();
+            setUpdateInfo(info);
+            if (info?.updateAvailable && localStorage.getItem(skippedUpdateKey) !== info.latestVersion) {
+                setShowUpdatePrompt(true);
+            }
+            if (manual) setMessage(info?.updateAvailable ? `发现新版本 ${info.latestVersion}。` : "当前已是最新稳定版本。");
+        } catch (error) {
+            if (manual) setMessage(`检查更新失败：${error}`);
+        } finally {
+            if (manual) setCheckingUpdate(false);
+        }
+    }
+
+    async function installUpdate() {
+        if (!updateInfo?.tagName) return;
+        setInstallingUpdate(true);
+        setUpdateProgress({phase: "starting", percent: 0, message: "准备更新…"});
+        try {
+            await InstallUpdate(updateInfo.tagName);
+        } catch (error) {
+            setInstallingUpdate(false);
+            setMessage(`更新失败：${error}`);
+            setUpdateProgress({phase: "failed", percent: 0, message: String(error)});
+        }
+    }
+
+    function skipUpdate() {
+        if (updateInfo?.latestVersion) {
+            localStorage.setItem(skippedUpdateKey, updateInfo.latestVersion);
+        }
+        setShowUpdatePrompt(false);
+        setMessage(`已跳过 ${updateInfo?.latestVersion || "此版本"}。`);
+    }
+
     const providerCount = providers.length;
     const activeProvider = isAddingProvider ? null : selectedProvider;
 
@@ -433,10 +487,11 @@ function App() {
                     <h1 className="text-lg font-bold">LocalRelay</h1>
                     <p className="text-xs text-zinc-500">本地模型网关配置</p>
                 </div>
-                <div className="grid w-[26rem] grid-cols-3 gap-2">
+                <div className="grid w-[34rem] grid-cols-4 gap-2">
                     <NavButton active={page === "providers"} onClick={() => setPage("providers")}>配置</NavButton>
                     <NavButton active={page === "apikeys"} onClick={() => setPage("apikeys")}>API Key</NavButton>
                     <NavButton active={page === "stats"} onClick={() => setPage("stats")}>Token 统计</NavButton>
+                    <NavButton active={page === "updates"} onClick={() => setPage("updates")}>更新</NavButton>
                 </div>
             </header>
 
@@ -462,6 +517,22 @@ function App() {
                             onDelete={removeAPIKey}
                             onCopy={copyText}
                             onToggleVisible={(id) => setVisibleApiKeys((current) => ({...current, [id]: !current[id]}))}
+                        />
+                        <StatusMessage message={message} providerCount={providerCount} />
+                    </div>
+                </main>
+            ) : page === "updates" ? (
+                <main className="min-h-0 flex-1 overflow-y-auto px-7 py-5">
+                    <div className="mx-auto max-w-4xl">
+                        <UpdatePanel
+                            appInfo={appInfo}
+                            updateInfo={updateInfo}
+                            checking={checkingUpdate}
+                            installing={installingUpdate}
+                            progress={updateProgress}
+                            onCheck={() => checkUpdates(true)}
+                            onInstall={installUpdate}
+                            onSkip={skipUpdate}
                         />
                         <StatusMessage message={message} providerCount={providerCount} />
                     </div>
@@ -675,6 +746,22 @@ function App() {
                         onChange={(patch) => setApiKeyDraft({...apiKeyDraft, ...patch})}
                         onSubmit={saveAPIKey}
                         onCancel={() => setShowApiKeyForm(false)}
+                    />
+                </Modal>
+            )}
+            {showUpdatePrompt && updateInfo?.updateAvailable && (
+                <Modal title={`发现新版本 ${updateInfo.latestVersion}`} onClose={() => setShowUpdatePrompt(false)}>
+                    <UpdatePanel
+                        appInfo={appInfo}
+                        updateInfo={updateInfo}
+                        checking={checkingUpdate}
+                        installing={installingUpdate}
+                        progress={updateProgress}
+                        compact
+                        onCheck={() => checkUpdates(true)}
+                        onInstall={installUpdate}
+                        onSkip={skipUpdate}
+                        onLater={() => setShowUpdatePrompt(false)}
                     />
                 </Modal>
             )}
@@ -994,6 +1081,91 @@ function APIKeyForm({draft, editing, onChange, onSubmit, onCancel}) {
 	);
 }
 
+function UpdatePanel({appInfo, updateInfo, checking, installing, progress, compact = false, onCheck, onInstall, onSkip, onLater}) {
+    const hasUpdate = updateInfo?.updateAvailable;
+    const scopeLabel = appInfo.installScope === "machine" ? "机器级安装" : "用户级安装";
+    return (
+        <section className={`rounded-2xl border border-zinc-800 bg-zinc-950/30 p-5 ${compact ? "" : "mt-7"}`}>
+            <div className="mb-5 flex flex-wrap items-start justify-between gap-3">
+                <div>
+                    <h2 className="text-xl font-bold">应用更新</h2>
+                    <p className="mt-1 text-sm text-zinc-500">
+                        当前版本 {appInfo.version || "—"} · {scopeLabel} · {appInfo.releaseRepo || "未配置发布仓库"}
+                    </p>
+                </div>
+                <button
+                    className="rounded-xl border border-zinc-700 px-4 py-2.5 font-bold text-zinc-300 hover:bg-zinc-900 disabled:cursor-wait disabled:opacity-60"
+                    type="button"
+                    disabled={checking || installing}
+                    onClick={onCheck}
+                >
+                    {checking ? "检查中…" : "检查更新"}
+                </button>
+            </div>
+
+            {updateInfo ? (
+                <div className={`rounded-2xl border p-4 ${hasUpdate ? "border-emerald-800 bg-emerald-950/20" : "border-zinc-800 bg-[#151515]"}`}>
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                        <div>
+                            <div className="text-lg font-bold">{hasUpdate ? `可更新到 ${updateInfo.latestVersion}` : "当前已是最新稳定版本"}</div>
+                            <div className="mt-1 text-sm text-zinc-500">
+                                {updateInfo.publishedAt ? `发布时间：${formatTime(updateInfo.publishedAt)}` : "未获取到发布时间"}
+                            </div>
+                        </div>
+                        <span className="rounded-full border border-zinc-700 px-3 py-1 text-xs text-zinc-400">
+                            将下载：{updateInfo.installScope === "machine" ? "机器级安装包" : "用户级安装包"}
+                        </span>
+                    </div>
+
+                    {hasUpdate && (
+                        <>
+                            <div className="mt-4 rounded-xl bg-black/20 p-3">
+                                <div className="mb-2 text-sm font-bold text-zinc-300">{updateInfo.name || updateInfo.tagName}</div>
+                                <pre className="max-h-56 overflow-auto whitespace-pre-wrap text-sm leading-6 text-zinc-400">{updateInfo.body || updateInfo.tagName}</pre>
+                            </div>
+                            <div className="mt-4 rounded-xl border border-zinc-800 bg-black/20 p-3 text-xs text-zinc-500">
+                                <div className="truncate">安装包：{updateInfo.assetName}</div>
+                                <div className="truncate">SHA-256：{updateInfo.checksum}</div>
+                            </div>
+                        </>
+                    )}
+                </div>
+            ) : (
+                <div className="rounded-2xl border border-dashed border-zinc-800 p-8 text-center text-zinc-500">
+                    点击「检查更新」获取最新稳定版本。
+                </div>
+            )}
+
+            {progress && (
+                <div className="mt-4 rounded-xl border border-zinc-800 bg-[#151515] p-4">
+                    <div className="mb-2 flex justify-between text-sm text-zinc-400">
+                        <span>{progress.message || "处理中…"}</span>
+                        <span>{progress.total > 0 ? `${progress.percent || 0}%` : formatBytes(progress.downloaded || 0)}</span>
+                    </div>
+                    <div className="h-2 overflow-hidden rounded-full bg-zinc-800">
+                        <div className="h-full bg-emerald-400 transition-all" style={{width: `${Math.max(0, Math.min(100, progress.percent || 0))}%`}} />
+                    </div>
+                </div>
+            )}
+
+            <div className="mt-5 flex flex-wrap justify-end gap-2">
+                {onLater && <button className="rounded-xl border border-zinc-700 px-4 py-2.5 font-bold text-zinc-300 hover:bg-zinc-900" type="button" onClick={onLater}>稍后处理</button>}
+                {hasUpdate && <button className="rounded-xl border border-zinc-700 px-4 py-2.5 font-bold text-zinc-300 hover:bg-zinc-900" type="button" disabled={installing} onClick={onSkip}>跳过此版本</button>}
+                {hasUpdate && (
+                    <button
+                        className="rounded-xl bg-zinc-100 px-5 py-2.5 font-bold text-zinc-950 hover:bg-white disabled:cursor-wait disabled:opacity-60"
+                        type="button"
+                        disabled={installing}
+                        onClick={onInstall}
+                    >
+                        {installing ? "更新中…" : "下载并安装"}
+                    </button>
+                )}
+            </div>
+        </section>
+    );
+}
+
 function StatsPanel({baseUrl, stats, statRows, trendRows, logPage, logPageNum, table, chart, grain, stackBy, metric, filter, providers, modelOptions, appOptions, onChange, onTable, onChart, onGrain, onStackBy, onMetric, onPage, onRefresh}) {
     const points = stats.points || [];
     const nonCacheInputTokens = nonCacheInput(stats);
@@ -1302,6 +1474,13 @@ function maskKey(key = "") {
 
 function fmt(value) {
     return Number(value || 0).toLocaleString();
+}
+
+function formatBytes(value) {
+    const bytes = Number(value || 0);
+    if (bytes >= 1024 * 1024) return `${Math.round(bytes / 1024 / 1024)} MB`;
+    if (bytes >= 1024) return `${Math.round(bytes / 1024)} KB`;
+    return `${bytes} B`;
 }
 
 function formatTime(value) {

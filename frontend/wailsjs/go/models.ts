@@ -1,5 +1,21 @@
 export namespace main {
 	
+	export class AppInfo {
+	    version: string;
+	    releaseRepo: string;
+	    installScope: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new AppInfo(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.version = source["version"];
+	        this.releaseRepo = source["releaseRepo"];
+	        this.installScope = source["installScope"];
+	    }
+	}
 	export class ProviderTestResult {
 	    model: string;
 	    content: string;
@@ -14,6 +30,40 @@ export namespace main {
 	        this.model = source["model"];
 	        this.content = source["content"];
 	        this.latencyMs = source["latencyMs"];
+	    }
+	}
+	export class UpdateInfo {
+	    currentVersion: string;
+	    latestVersion: string;
+	    tagName: string;
+	    name: string;
+	    publishedAt: string;
+	    body: string;
+	    htmlUrl: string;
+	    assetName: string;
+	    assetUrl: string;
+	    checksum: string;
+	    installScope: string;
+	    updateAvailable: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new UpdateInfo(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.currentVersion = source["currentVersion"];
+	        this.latestVersion = source["latestVersion"];
+	        this.tagName = source["tagName"];
+	        this.name = source["name"];
+	        this.publishedAt = source["publishedAt"];
+	        this.body = source["body"];
+	        this.htmlUrl = source["htmlUrl"];
+	        this.assetName = source["assetName"];
+	        this.assetUrl = source["assetUrl"];
+	        this.checksum = source["checksum"];
+	        this.installScope = source["installScope"];
+	        this.updateAvailable = source["updateAvailable"];
 	    }
 	}
 

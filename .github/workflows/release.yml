@@ -54,7 +54,7 @@ jobs:
 
       - name: Build user and machine installers
         shell: pwsh
-        run: .\build.ps1 -InstallScope both -Version "${{ steps.version.outputs.version }}"
+        run: .\build.ps1 -InstallScope both -Version "${{ steps.version.outputs.version }}" -ReleaseRepo "${{ github.repository }}"
 
       - name: Create checksums
         shell: pwsh

@@ -2,7 +2,9 @@ param(
     [ValidateSet("user", "machine", "both")]
     [string]$InstallScope = "user",
 
-    [string]$Version = ""
+    [string]$Version = "",
+
+    [string]$ReleaseRepo = "silevilence/LocalRelay"
 )
 
 $ErrorActionPreference = "Stop"
@@ -47,7 +49,7 @@ try {
             Remove-Item -LiteralPath $Installer
         }
 
-        wails build -platform windows/amd64 -nsis -installscope $Scope -webview2 error
+        wails build -platform windows/amd64 -nsis -installscope $Scope -webview2 error -ldflags "-X main.appVersion=$ProductVersion -X main.releaseRepo=$ReleaseRepo"
         if (-not (Test-Path $Installer)) {
             throw "Installer was not created: $Installer"
         }
