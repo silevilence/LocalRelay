@@ -56,5 +56,35 @@ func BuiltinProviderPresets() []ProviderPreset {
 				{ID: "deepseek-ai/DeepSeek-V4-Flash", Name: "DeepSeek V4 Flash", Capabilities: `{"tools":true,"thinking":true}`, ContextLength: 1048576, MaxTokens: 393216},
 			},
 		},
+		{
+			ID:               "anthropic",
+			Name:             "Anthropic",
+			Type:             "anthropic",
+			BaseURL:          "https://api.anthropic.com/v1",
+			CapabilityConfig: capabilities.DefaultJSON("anthropic"),
+			Models: []ModelInput{
+				{ID: "claude-sonnet-4-20250514", Name: "Claude Sonnet 4", Capabilities: `{"tools":true,"stream":true,"vision":true,"thinking":true}`, ContextLength: 200000, MaxTokens: 64000},
+			},
+		},
+		{
+			ID:               "gemini",
+			Name:             "Google Gemini",
+			Type:             "gemini",
+			BaseURL:          "https://generativelanguage.googleapis.com/v1beta",
+			CapabilityConfig: capabilities.DefaultJSON("gemini"),
+			Models: []ModelInput{
+				{ID: "gemini-flash-latest", Name: "Gemini Flash Latest", Capabilities: `{"tools":true,"stream":true,"vision":true,"thinking":true}`, ContextLength: 1000000, MaxTokens: 65536},
+			},
+		},
+		{
+			ID:               "openai-responses",
+			Name:             "OpenAI Responses",
+			Type:             "openai-responses",
+			BaseURL:          "https://api.openai.com/v1",
+			CapabilityConfig: capabilities.DefaultJSON("openai-responses"),
+			Models: []ModelInput{
+				{ID: "gpt-5.2", Name: "GPT-5.2", Capabilities: `{"tools":true,"stream":true,"vision":true,"thinking":true}`, ContextLength: 400000, MaxTokens: 128000},
+			},
+		},
 	}
 }

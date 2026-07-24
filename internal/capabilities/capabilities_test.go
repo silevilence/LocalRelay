@@ -19,6 +19,9 @@ func TestParseValidateAndDefaults(t *testing.T) {
 	if _, err := Parse(`{"thinking":{}}`); err == nil {
 		t.Fatal("expected missing protocol error")
 	}
+	if _, err := Parse(`{"protocol":"wat"}`); err == nil {
+		t.Fatal("expected unsupported protocol error")
+	}
 	if _, err := Parse(`{"protocol":"openai_chat","thinking":{"requestMessageField":"thinking_content"}}`); err == nil {
 		t.Fatal("expected unsupported request message field error")
 	}
@@ -27,6 +30,9 @@ func TestParseValidateAndDefaults(t *testing.T) {
 	}
 	if got := DefaultJSON("missing"); got == "" || got == "{}" {
 		t.Fatalf("fallback default = %q", got)
+	}
+	if cfg, err := Parse(DefaultJSON("gemini")); err != nil || cfg.Protocol != ProtocolGemini {
+		t.Fatalf("gemini default = %#v/%v", cfg, err)
 	}
 }
 

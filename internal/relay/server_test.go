@@ -190,6 +190,96 @@ func TestChatCompletionStreamRelayAndLogs(t *testing.T) {
 	}
 }
 
+func TestChatCompletionRelayUsesConfiguredUpstreamProtocols(t *testing.T) {
+	tests := []struct {
+		name        string
+		protocol    string
+		providerTyp string
+		path        string
+		authHeader  string
+		authValue   string
+		response    string
+	}{
+		{
+			name:        "anthropic",
+			protocol:    capabilities.ProtocolAnthropic,
+			providerTyp: "anthropic",
+			path:        "/v1/messages",
+			authHeader:  "X-Api-Key",
+			authValue:   "sk-test",
+			response:    `{"id":"msg_1","type":"message","role":"assistant","model":"claude-test","content":[{"type":"text","text":"pong"}],"stop_reason":"end_turn","usage":{"input_tokens":2,"output_tokens":1}}`,
+		},
+		{
+			name:        "gemini",
+			protocol:    capabilities.ProtocolGemini,
+			providerTyp: "gemini",
+			path:        "/v1beta/models/m1:generateContent",
+			authHeader:  "X-Goog-Api-Key",
+			authValue:   "sk-test",
+			response:    `{"responseId":"gem_1","modelVersion":"gemini-test","candidates":[{"index":0,"content":{"role":"model","parts":[{"text":"pong"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":2,"candidatesTokenCount":1}}`,
+		},
+		{
+			name:        "openai responses",
+			protocol:    capabilities.ProtocolOpenAIResponse,
+			providerTyp: "openai-responses",
+			path:        "/v1/responses",
+			authHeader:  "Authorization",
+			authValue:   "Bearer sk-test",
+			response:    `{"id":"resp_1","object":"response","status":"completed","model":"gpt-test","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"pong"}]}],"usage":{"input_tokens":2,"output_tokens":1,"total_tokens":3}}`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var upstreamPath, auth string
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				upstreamPath = r.URL.RequestURI()
+				auth = r.Header.Get(tt.authHeader)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, tt.response)
+			}))
+			defer upstream.Close()
+
+			s := openRelayStore(t)
+			defer s.Close()
+			cfg := `{"protocol":"` + tt.protocol + `"}`
+			baseURL := upstream.URL + "/v1"
+			if tt.protocol == capabilities.ProtocolGemini {
+				baseURL = upstream.URL + "/v1beta"
+			}
+			if _, err := s.CreateProvider(store.ProviderInput{ID: "p1", Name: "P1", Type: tt.providerTyp, BaseURL: baseURL, APIKey: "sk-test", CapabilityConfig: cfg}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.CreateModel(store.ModelInput{ID: "m1", ProviderID: "p1", Name: "M1"}); err != nil {
+				t.Fatal(err)
+			}
+			relay := New(s)
+			defer relay.Close()
+			server := httptest.NewServer(relay)
+			defer server.Close()
+
+			resp, err := http.Post(server.URL+"/v1/chat/completions", "application/json", bytes.NewBufferString(`{"model":"p1/m1","messages":[{"role":"user","content":"ping"}],"max_tokens":16}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			var out struct {
+				Model   string `json:"model"`
+				Choices []struct {
+					Message struct {
+						Content string `json:"content"`
+					} `json:"message"`
+				} `json:"choices"`
+			}
+			if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+				t.Fatal(err)
+			}
+			if resp.StatusCode != http.StatusOK || upstreamPath != tt.path || auth != tt.authValue || out.Model != "p1/m1" || out.Choices[0].Message.Content != "pong" {
+				t.Fatalf("status/path/auth/out = %d/%q/%q/%#v", resp.StatusCode, upstreamPath, auth, out)
+			}
+		})
+	}
+}
+
 func TestChatCompletionStreamMalformedUpstreamSendsErrorAndLogsFailure(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -608,7 +698,6 @@ func TestChatRequestErrorBranches(t *testing.T) {
 	}{
 		{name: "bad json", body: `{`, status: http.StatusBadRequest, code: "bad_request"},
 		{name: "bad request after route", body: `{"model":"badtype/m1","messages":[{"role":"developer","content":"x"}]}`, status: http.StatusBadRequest, code: "bad_request"},
-		{name: "unsupported provider", body: `{"model":"badtype/m1","messages":[{"role":"user","content":"x"}]}`, status: http.StatusBadRequest, code: "unsupported_provider"},
 		{name: "upstream error", body: `{"model":"badurl/m1","messages":[{"role":"user","content":"x"}]}`, status: http.StatusBadGateway, code: "upstream_error"},
 	}
 	for _, tt := range tests {

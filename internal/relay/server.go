@@ -6,15 +6,20 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
 
 	"localrelay/internal/capabilities"
 	"localrelay/internal/ir"
+	"localrelay/internal/protocol/anthropic"
+	"localrelay/internal/protocol/gemini"
 	"localrelay/internal/protocol/openaichat"
+	"localrelay/internal/protocol/openairesponses"
 	"localrelay/internal/store"
 )
 
@@ -121,6 +126,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		writeError(w, status, "bad_provider_capabilities", err.Error())
 		return
 	}
+	log.Protocol = providerCapabilities.Protocol
 
 	irReq, err := clientReq.ToIRWithCapabilities(providerCapabilities)
 	if err != nil {
@@ -131,7 +137,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 	irReq.Model = routed.Model.ID
 
-	providerReq, err := openaichat.ToProviderRequest(irReq, providerCapabilities)
+	providerReq, err := toProviderRequest(irReq, providerCapabilities)
 	if err != nil {
 		status = http.StatusBadRequest
 		log.Error = err.Error()
@@ -146,7 +152,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	upstreamResp, err := s.postProvider(r.Context(), routed.Provider, upstreamBody)
+	upstreamResp, err := s.postProvider(r.Context(), routed.Provider, providerCapabilities, routed.Model.ID, clientReq.Stream, upstreamBody)
 	if err != nil {
 		status = http.StatusBadGateway
 		log.Error = err.Error()
@@ -187,7 +193,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	irResp, err := openaichat.ParseResponseWithCapabilities(respBody, providerCapabilities)
+	irResp, err := parseProviderResponse(respBody, providerCapabilities)
 	if err != nil {
 		status = http.StatusBadGateway
 		log.Error = err.Error()
@@ -220,7 +226,7 @@ func (s *Server) streamProviderResponse(ctx context.Context, w http.ResponseWrit
 	w.Header().Set("X-Accel-Buffering", "no")
 	w.WriteHeader(http.StatusOK)
 	flusher.Flush()
-	return openaichat.ForEachStreamEvent(body, cfg, func(event ir.StreamEvent) error {
+	return forEachProviderStreamEvent(body, cfg, func(event ir.StreamEvent) error {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -288,25 +294,104 @@ func (s *Server) writeLogs() {
 	}
 }
 
-func (s *Server) postProvider(ctx context.Context, provider store.Provider, body []byte) (*http.Response, error) {
-	req, err := http.NewRequest(http.MethodPost, chatURL(provider.BaseURL), bytes.NewReader(body))
+func (s *Server) postProvider(ctx context.Context, provider store.Provider, cfg capabilities.Provider, model string, stream bool, body []byte) (*http.Response, error) {
+	req, err := http.NewRequest(http.MethodPost, providerURL(provider.BaseURL, cfg.Protocol, model, stream), bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
 	req = req.WithContext(ctx)
 	req.Header.Set("Content-Type", "application/json")
 	if provider.APIKey != "" {
-		req.Header.Set("Authorization", "Bearer "+provider.APIKey)
+		switch cfg.Protocol {
+		case capabilities.ProtocolGemini:
+			req.Header.Set("X-Goog-Api-Key", provider.APIKey)
+		case capabilities.ProtocolAnthropic:
+			req.Header.Set("X-Api-Key", provider.APIKey)
+			req.Header.Set("Anthropic-Version", "2023-06-01")
+		default:
+			req.Header.Set("Authorization", "Bearer "+provider.APIKey)
+		}
 	}
 	return s.client.Do(req)
 }
 
-func chatURL(base string) string {
-	base = strings.TrimRight(strings.TrimSpace(base), "/")
-	if strings.HasSuffix(base, "/chat/completions") {
-		return base
+func toProviderRequest(req ir.Request, cfg capabilities.Provider) (any, error) {
+	switch cfg.Protocol {
+	case capabilities.ProtocolOpenAIChat:
+		return openaichat.ToProviderRequest(req, cfg)
+	case capabilities.ProtocolAnthropic:
+		return anthropic.ToProviderRequest(req)
+	case capabilities.ProtocolGemini:
+		return gemini.ToProviderRequest(req)
+	case capabilities.ProtocolOpenAIResponse:
+		return openairesponses.ToProviderRequest(req)
+	default:
+		return nil, fmt.Errorf("unsupported provider protocol %q", cfg.Protocol)
 	}
-	return base + "/chat/completions"
+}
+
+func parseProviderResponse(data []byte, cfg capabilities.Provider) (ir.Response, error) {
+	switch cfg.Protocol {
+	case capabilities.ProtocolOpenAIChat:
+		return openaichat.ParseResponseWithCapabilities(data, cfg)
+	case capabilities.ProtocolAnthropic:
+		return anthropic.ParseResponse(data)
+	case capabilities.ProtocolGemini:
+		return gemini.ParseResponse(data)
+	case capabilities.ProtocolOpenAIResponse:
+		return openairesponses.ParseResponse(data)
+	default:
+		return ir.Response{}, fmt.Errorf("unsupported provider protocol %q", cfg.Protocol)
+	}
+}
+
+func forEachProviderStreamEvent(r io.Reader, cfg capabilities.Provider, yield func(ir.StreamEvent) error) error {
+	switch cfg.Protocol {
+	case capabilities.ProtocolOpenAIChat:
+		return openaichat.ForEachStreamEvent(r, cfg, yield)
+	case capabilities.ProtocolAnthropic:
+		return anthropic.ForEachStreamEvent(r, yield)
+	case capabilities.ProtocolGemini:
+		return gemini.ForEachStreamEvent(r, yield)
+	case capabilities.ProtocolOpenAIResponse:
+		return openairesponses.ForEachStreamEvent(r, yield)
+	default:
+		return fmt.Errorf("unsupported provider protocol %q", cfg.Protocol)
+	}
+}
+
+func providerURL(base string, protocol string, model string, stream bool) string {
+	base = strings.TrimRight(strings.TrimSpace(base), "/")
+	switch protocol {
+	case capabilities.ProtocolAnthropic:
+		if strings.HasSuffix(base, "/messages") {
+			return base
+		}
+		return base + "/messages"
+	case capabilities.ProtocolGemini:
+		action := "generateContent"
+		if stream {
+			action = "streamGenerateContent?alt=sse"
+		}
+		if strings.Contains(base, ":generateContent") || strings.Contains(base, ":streamGenerateContent") {
+			return base
+		}
+		return base + "/models/" + url.PathEscape(model) + ":" + action
+	case capabilities.ProtocolOpenAIResponse:
+		if strings.HasSuffix(base, "/responses") {
+			return base
+		}
+		return base + "/responses"
+	default:
+		if strings.HasSuffix(base, "/chat/completions") {
+			return base
+		}
+		return base + "/chat/completions"
+	}
+}
+
+func chatURL(base string) string {
+	return providerURL(base, capabilities.ProtocolOpenAIChat, "", false)
 }
 
 func routeStatus(err error) int {

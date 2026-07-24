@@ -24,7 +24,7 @@ func TestProviderModelTestSendsChatRequest(t *testing.T) {
 			t.Fatal(err)
 		}
 		upstreamModel = req.Model
-		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"OK"}}]}`))
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"OK"}}]}`))
 	}))
 	defer upstream.Close()
 

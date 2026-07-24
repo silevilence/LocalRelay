@@ -30,6 +30,21 @@ const emptyApiKey = {id: 0, name: "", description: ""};
 const thinkingRequestFieldOptions = ["thinking", "enable_thinking", "thinking_budget"];
 const reasoningValueOptions = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
 const reasoningMapSources = ["none", "minimal", "low", "medium", "high", "xhigh"];
+const providerProtocolOptions = [
+    ["openai_chat", "OpenAI Chat Completions"],
+    ["anthropic_messages", "Anthropic Messages"],
+    ["gemini", "Google Gemini"],
+    ["openai_responses", "OpenAI Responses"],
+];
+const providerTypeOptions = [
+    ["openai", "OpenAI"],
+    ["openai-compatible", "OpenAI 兼容"],
+    ["deepseek", "DeepSeek"],
+    ["siliconflow", "硅基流动"],
+    ["anthropic", "Anthropic"],
+    ["gemini", "Google Gemini"],
+    ["openai-responses", "OpenAI Responses"],
+];
 
 function App() {
     const [providers, setProviders] = useState([]);
@@ -206,7 +221,7 @@ function App() {
     async function saveProvider(event) {
         event.preventDefault();
         if (!providerDraft.id || !providerDraft.name || !providerDraft.type || !providerDraft.baseUrl) {
-            setMessage("平台 ID、名称、类型和 API 地址必填。");
+            setMessage("平台 ID、名称、供应商分类和 API 地址必填。");
             return;
         }
         const preset = providerPresets.find((item) => item.id === selectedPresetId);
@@ -688,6 +703,7 @@ function ProviderPanel({
     onTest,
 }) {
     const selectedPreset = presets.find((preset) => preset.id === selectedPresetId);
+    const typeOptions = providerTypeOptionsWithCurrent(presets, draft.type);
     return (
         <form className="space-y-7" onSubmit={onSubmit}>
             {isAdding && presets.length > 0 && (
@@ -695,7 +711,7 @@ function ProviderPanel({
                     <div className="flex flex-wrap items-center justify-between gap-3">
                         <div>
                             <h2 className="text-xl font-bold">供应商预设</h2>
-                            <p className="mt-1 text-sm text-zinc-500">选择后会填入地址、类型，并自动导入常用模型。</p>
+                            <p className="mt-1 text-sm text-zinc-500">选择后会填入地址、供应商分类，并自动导入常用模型。</p>
                         </div>
                         <button className="rounded-xl border border-zinc-700 px-4 py-2 font-semibold text-zinc-100 hover:bg-zinc-900" type="button" onClick={onOpenPresetPicker}>
                             {selectedPreset ? `已选：${selectedPreset.name}` : "选择预设"}
@@ -755,7 +771,7 @@ function ProviderPanel({
                 <div className="grid gap-4 md:grid-cols-3">
                     <Field label="平台 ID" value={draft.id} onChange={(id) => onChange({id})} placeholder="right-code-gemini" />
                     <Field label="平台名称" value={draft.name} onChange={(name) => onChange({name})} placeholder="Right Code Gemini" />
-                    <Field label="类型" value={draft.type} onChange={(type) => onChange({type})} placeholder="openai" />
+                    <SelectField label="供应商分类" value={draft.type} onChange={(type) => onChange({type})} options={typeOptions} />
                 </div>
             )}
 
@@ -791,7 +807,7 @@ function ProviderPanel({
                     onChange={(event) => onChange({baseUrl: event.target.value})}
                     placeholder="https://api.openai.com/v1"
                 />
-                <p className="mt-2 text-sm text-zinc-500">预览：{previewChatUrl(draft.baseUrl)}</p>
+                <p className="mt-2 text-sm text-zinc-500">预览：{previewProviderUrl(draft.baseUrl, draft.capabilityConfig)}</p>
             </div>
 
             <ProviderCapabilityEditor value={draft.capabilityConfig} onChange={(capabilityConfig) => onChange({capabilityConfig})} />
@@ -987,7 +1003,7 @@ function StatsPanel({baseUrl, stats, statRows, trendRows, logPage, logPageNum, t
             <div className="mb-4 flex flex-wrap items-end justify-between gap-3">
                 <div>
                     <h2 className="text-xl font-bold">Token 统计</h2>
-                    <p className="mt-1 text-sm text-zinc-500">本地入口：{baseUrl ? `${baseUrl}/v1/chat/completions` : "启动中…"}</p>
+                    <p className="mt-1 text-sm text-zinc-500">本地入口：{baseUrl ? `${baseUrl}/v1/chat/completions` : "启动中…"}；上游协议由平台配置决定。</p>
                 </div>
                 <div className="flex flex-wrap items-end gap-2">
                     <Field label="开始" type="date" value={filter.from} onChange={(from) => onChange({from})} />
@@ -1391,7 +1407,7 @@ function ProviderCapabilityEditor({value, onChange}) {
                         label="上游协议"
                         value={cfg.protocol || "openai_chat"}
                         onChange={(protocol) => update({protocol})}
-                        options={[["openai_chat", "OpenAI Chat Completions"]]}
+                        options={providerProtocolOptions}
                     />
                     <SelectField
                         label="推理强度字段"
@@ -1645,15 +1661,29 @@ function providerToDraft(provider) {
     };
 }
 
+function providerTypeOptionsWithCurrent(presets, current) {
+    const labels = new Map(providerTypeOptions);
+    for (const preset of presets || []) {
+        if (preset.type && !labels.has(preset.type)) labels.set(preset.type, preset.type);
+    }
+    if (current && !labels.has(current)) labels.set(current, current);
+    return Array.from(labels);
+}
+
 function modelFamily(id = "") {
     const parts = id.split("-").filter(Boolean);
     if (parts.length >= 2) return `${parts[0]}-${parts[1]}`;
     return parts[0] || "models";
 }
 
-function previewChatUrl(baseUrl = "") {
+function previewProviderUrl(baseUrl = "", capabilityConfig = "") {
     const trimmed = baseUrl.trim().replace(/\/+$/, "");
-    return trimmed ? `${trimmed}/chat/completions` : "填写 API 地址后显示";
+    if (!trimmed) return "填写 API 地址后显示";
+    const protocol = parseJsonObject(capabilityConfig, {protocol: "openai_chat"}).protocol || "openai_chat";
+    if (protocol === "anthropic_messages") return trimmed.endsWith("/messages") ? trimmed : `${trimmed}/messages`;
+    if (protocol === "gemini") return `${trimmed}/models/{model}:generateContent`;
+    if (protocol === "openai_responses") return trimmed.endsWith("/responses") ? trimmed : `${trimmed}/responses`;
+    return trimmed.endsWith("/chat/completions") ? trimmed : `${trimmed}/chat/completions`;
 }
 
 function today() {

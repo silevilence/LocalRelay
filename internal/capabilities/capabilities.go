@@ -8,7 +8,12 @@ import (
 	"strings"
 )
 
-const ProtocolOpenAIChat = "openai_chat"
+const (
+	ProtocolOpenAIChat     = "openai_chat"
+	ProtocolAnthropic      = "anthropic_messages"
+	ProtocolGemini         = "gemini"
+	ProtocolOpenAIResponse = "openai_responses"
+)
 const ThinkingFieldReasoningContent = "reasoning_content"
 
 type Provider struct {
@@ -52,6 +57,9 @@ func Parse(raw string) (Provider, error) {
 	}
 	if strings.TrimSpace(cfg.Protocol) == "" {
 		return Provider{}, errors.New("capabilityConfig.protocol is required")
+	}
+	if !supportedProtocol(cfg.Protocol) {
+		return Provider{}, fmt.Errorf("unsupported protocol %q", cfg.Protocol)
 	}
 	if !supportedThinkingMessageField(cfg.Thinking.RequestMessageField) {
 		return Provider{}, fmt.Errorf("unsupported thinking.requestMessageField %q", cfg.Thinking.RequestMessageField)
@@ -102,6 +110,15 @@ func supportedThinkingMessageField(field string) bool {
 	return field == "" || field == ThinkingFieldReasoningContent
 }
 
+func supportedProtocol(protocol string) bool {
+	switch protocol {
+	case ProtocolOpenAIChat, ProtocolAnthropic, ProtocolGemini, ProtocolOpenAIResponse:
+		return true
+	default:
+		return false
+	}
+}
+
 var defaults = map[string]Provider{
 	"openai": {
 		Protocol: ProtocolOpenAIChat,
@@ -111,6 +128,9 @@ var defaults = map[string]Provider{
 		},
 	},
 	"openai-compatible": {Protocol: ProtocolOpenAIChat},
+	"anthropic":         {Protocol: ProtocolAnthropic},
+	"gemini":            {Protocol: ProtocolGemini},
+	"openai-responses":  {Protocol: ProtocolOpenAIResponse},
 	"deepseek": {
 		Protocol: ProtocolOpenAIChat,
 		Thinking: Thinking{
