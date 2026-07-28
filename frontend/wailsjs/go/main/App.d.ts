@@ -35,6 +35,10 @@ export function ListProviders():Promise<Array<store.Provider>>;
 
 export function RelayBaseURL():Promise<string>;
 
+export function RelayPort():Promise<number>;
+
+export function SetRelayPort(arg1:number):Promise<number>;
+
 export function TestProviderModel(arg1:string,arg2:string):Promise<main.ProviderTestResult>;
 
 export function TokenStatApps(arg1:store.TokenStatsFilter):Promise<Array<string>>;

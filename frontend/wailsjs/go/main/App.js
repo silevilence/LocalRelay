@@ -66,6 +66,14 @@ export function RelayBaseURL() {
   return window['go']['main']['App']['RelayBaseURL']();
 }
 
+export function RelayPort() {
+  return window['go']['main']['App']['RelayPort']();
+}
+
+export function SetRelayPort(arg1) {
+  return window['go']['main']['App']['SetRelayPort'](arg1);
+}
+
 export function TestProviderModel(arg1, arg2) {
   return window['go']['main']['App']['TestProviderModel'](arg1, arg2);
 }

@@ -78,6 +78,34 @@ func TestProviderCRUDEncryptsAPIKey(t *testing.T) {
 	}
 }
 
+func TestRelayPortDefaultsPersistsAndValidates(t *testing.T) {
+	s := openTestStore(t)
+	defer s.Close()
+
+	port, err := s.RelayPort()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if port != DefaultRelayPort {
+		t.Fatalf("default relay port = %d, want %d", port, DefaultRelayPort)
+	}
+	if err := s.SetRelayPort(9123); err != nil {
+		t.Fatal(err)
+	}
+	port, err = s.RelayPort()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if port != 9123 {
+		t.Fatalf("saved relay port = %d, want 9123", port)
+	}
+	for _, invalid := range []int{0, -1, 65536} {
+		if err := s.SetRelayPort(invalid); err == nil {
+			t.Fatalf("SetRelayPort(%d) succeeded", invalid)
+		}
+	}
+}
+
 func TestProviderCapabilityConfigIsStoredAndValidated(t *testing.T) {
 	s := openTestStore(t)
 	defer s.Close()

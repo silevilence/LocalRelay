@@ -2,11 +2,15 @@ package main
 
 import (
 	"encoding/json"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
 	"testing"
 
+	"localrelay/internal/relay"
 	"localrelay/internal/store"
 )
 
@@ -47,4 +51,69 @@ func TestProviderModelTestSendsChatRequest(t *testing.T) {
 	if upstreamModel != "m" || auth != "Bearer sk-test" || result.Model != "p/m" || result.Content != "OK" {
 		t.Fatalf("test result=%#v upstream=%q auth=%q", result, upstreamModel, auth)
 	}
+}
+
+func TestRelayGatewayUsesWildcardListenerAndCanChangePort(t *testing.T) {
+	s, err := store.Open(filepath.Join(t.TempDir(), "localrelay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	app := &App{store: s}
+	app.relay = relay.New(s)
+	defer app.shutdown(nil)
+
+	initialPort := availablePort(t)
+	if err := s.SetRelayPort(initialPort); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.startRelay(initialPort); err != nil {
+		t.Fatal(err)
+	}
+	if app.relayServer == nil {
+		t.Fatal("relay server was not started")
+	}
+	if got := app.RelayBaseURL(); got != "http://127.0.0.1:"+strconv.Itoa(initialPort) {
+		t.Fatalf("relay base URL = %q", got)
+	}
+	response, err := http.Get(app.RelayBaseURL() + "/healthz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.Copy(io.Discard, response.Body)
+	response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("health status = %d", response.StatusCode)
+	}
+
+	nextPort := availablePort(t)
+	if _, err := app.SetRelayPort(nextPort); err != nil {
+		t.Fatal(err)
+	}
+	if got := app.RelayBaseURL(); got != "http://127.0.0.1:"+strconv.Itoa(nextPort) {
+		t.Fatalf("relay base URL after change = %q", got)
+	}
+}
+
+func TestListenRelayBindsAllInterfaces(t *testing.T) {
+	listener, err := listenRelay(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	address, ok := listener.Addr().(*net.TCPAddr)
+	if !ok || !address.IP.IsUnspecified() {
+		t.Fatalf("relay listener address = %v, want wildcard address", listener.Addr())
+	}
+}
+
+func availablePort(t *testing.T) int {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	return listener.Addr().(*net.TCPAddr).Port
 }

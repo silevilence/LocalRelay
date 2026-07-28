@@ -29,6 +29,10 @@ var (
 
 const NoAppName = "无应用"
 
+// DefaultRelayPort is the TCP port used by the local gateway when the user has
+// not selected another port.
+const DefaultRelayPort = 8718
+
 type Store struct {
 	db  *sql.DB
 	key [32]byte
@@ -255,6 +259,11 @@ CREATE TABLE IF NOT EXISTS api_keys (
 	updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS app_settings (
+	key TEXT PRIMARY KEY,
+	value TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_models_provider_id ON models(provider_id);
 CREATE INDEX IF NOT EXISTS idx_call_logs_started_at ON call_logs(started_at);
 CREATE INDEX IF NOT EXISTS idx_call_logs_provider_model ON call_logs(provider_id, model_id);
@@ -275,6 +284,7 @@ func (s *Store) applyMigrations() error {
 		{2, s.ensureProviderCapabilityConfigColumn},
 		{3, s.ensureModelEnabledColumn},
 		{4, s.ensureAPIKeyStatsSchema},
+		{5, s.ensureAppSettingsSchema},
 	}
 	for _, migration := range migrations {
 		var exists int
@@ -290,6 +300,46 @@ func (s *Store) applyMigrations() error {
 		if _, err := s.db.Exec(`INSERT INTO schema_migrations(version, applied_at) VALUES (?, CURRENT_TIMESTAMP)`, migration.version); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// RelayPort returns the persisted gateway port, falling back to the default
+// for installations created before the setting existed.
+func (s *Store) RelayPort() (int, error) {
+	var value string
+	err := s.db.QueryRow(`SELECT value FROM app_settings WHERE key = 'relay_port'`).Scan(&value)
+	if errors.Is(err, sql.ErrNoRows) {
+		return DefaultRelayPort, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	var port int
+	if _, err := fmt.Sscanf(value, "%d", &port); err != nil {
+		return 0, fmt.Errorf("stored relay port is invalid: %w", err)
+	}
+	if err := ValidateRelayPort(port); err != nil {
+		return 0, fmt.Errorf("stored relay port is invalid: %w", err)
+	}
+	return port, nil
+}
+
+// SetRelayPort saves the TCP port selected for the gateway.
+func (s *Store) SetRelayPort(port int) error {
+	if err := ValidateRelayPort(port); err != nil {
+		return err
+	}
+	_, err := s.db.Exec(`
+INSERT INTO app_settings(key, value) VALUES ('relay_port', ?)
+ON CONFLICT(key) DO UPDATE SET value = excluded.value`, fmt.Sprintf("%d", port))
+	return err
+}
+
+// ValidateRelayPort rejects ports that cannot be used as a TCP listen port.
+func ValidateRelayPort(port int) error {
+	if port < 1 || port > 65535 {
+		return fmt.Errorf("relay port must be between 1 and 65535")
 	}
 	return nil
 }
@@ -1018,6 +1068,15 @@ CREATE INDEX IF NOT EXISTS idx_call_logs_app_name ON call_logs(app_name);
 		return err
 	}
 	return nil
+}
+
+func (s *Store) ensureAppSettingsSchema() error {
+	_, err := s.db.Exec(`
+CREATE TABLE IF NOT EXISTS app_settings (
+	key TEXT PRIMARY KEY,
+	value TEXT NOT NULL
+)`)
+	return err
 }
 
 func (s *Store) hasColumn(table, column string) (bool, error) {

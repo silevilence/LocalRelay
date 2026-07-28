@@ -15,6 +15,8 @@ import {
     ListProviderPresets,
     ListProviders,
     RelayBaseURL,
+    RelayPort,
+    SetRelayPort,
     TokenStatApps,
     TokenStatModels,
     TokenStatRows,
@@ -79,6 +81,8 @@ function App() {
     const [message, setMessage] = useState("正在加载本地配置…");
     const [toast, setToast] = useState("");
     const [relayBaseUrl, setRelayBaseUrl] = useState("");
+    const [relayPort, setRelayPort] = useState("");
+    const [savingRelayPort, setSavingRelayPort] = useState(false);
     const [statsFilter, setStatsFilter] = useState({from: daysAgo(7), to: today(), providerId: "", modelId: "", appName: ""});
     const [statsModelOptions, setStatsModelOptions] = useState([]);
     const [statsAppOptions, setStatsAppOptions] = useState([]);
@@ -139,6 +143,7 @@ function App() {
         refreshAPIKeys();
         ListProviderPresets().then((items) => setProviderPresets(items || [])).catch(() => {});
         RelayBaseURL().then(setRelayBaseUrl).catch(() => {});
+        RelayPort().then((port) => setRelayPort(String(port))).catch(() => {});
         AppInfo().then(setAppInfo).catch(() => {});
         checkUpdates(false);
     }, []);
@@ -469,6 +474,27 @@ function App() {
         }
     }
 
+    async function saveRelayPort(event) {
+        event.preventDefault();
+        if (!/^\d+$/.test(relayPort) || Number(relayPort) < 1 || Number(relayPort) > 65535) {
+            setMessage("端口号必须是 1 到 65535 之间的整数。");
+            return;
+        }
+        setSavingRelayPort(true);
+        try {
+            const port = await SetRelayPort(Number(relayPort));
+            setRelayPort(String(port));
+            setRelayBaseUrl(await RelayBaseURL());
+            const success = `网关已重启并监听 ${port} 端口。`;
+            setMessage(success);
+            notify(success);
+        } catch (error) {
+            setMessage(`保存端口失败：${error}`);
+        } finally {
+            setSavingRelayPort(false);
+        }
+    }
+
     function skipUpdate() {
         if (updateInfo?.latestVersion) {
             localStorage.setItem(skippedUpdateKey, updateInfo.latestVersion);
@@ -488,10 +514,10 @@ function App() {
                     <p className="text-xs text-zinc-500">本地模型网关配置</p>
                 </div>
                 <div className="grid w-[34rem] grid-cols-4 gap-2">
-                    <NavButton active={page === "providers"} onClick={() => setPage("providers")}>配置</NavButton>
+                    <NavButton active={page === "providers"} onClick={() => setPage("providers")}>提供商</NavButton>
                     <NavButton active={page === "apikeys"} onClick={() => setPage("apikeys")}>API Key</NavButton>
                     <NavButton active={page === "stats"} onClick={() => setPage("stats")}>Token 统计</NavButton>
-                    <NavButton active={page === "updates"} onClick={() => setPage("updates")}>更新</NavButton>
+                    <NavButton active={page === "settings"} onClick={() => setPage("settings")}>设置</NavButton>
                 </div>
             </header>
 
@@ -521,9 +547,16 @@ function App() {
                         <StatusMessage message={message} providerCount={providerCount} />
                     </div>
                 </main>
-            ) : page === "updates" ? (
+            ) : page === "settings" ? (
                 <main className="min-h-0 flex-1 overflow-y-auto px-7 py-5">
                     <div className="mx-auto max-w-4xl">
+                        <RelaySettingsPanel
+                            baseUrl={relayBaseUrl}
+                            port={relayPort}
+                            saving={savingRelayPort}
+                            onPortChange={setRelayPort}
+                            onSubmit={saveRelayPort}
+                        />
                         <UpdatePanel
                             appInfo={appInfo}
                             updateInfo={updateInfo}
@@ -1079,6 +1112,39 @@ function APIKeyForm({draft, editing, onChange, onSubmit, onCancel}) {
 			</div>
 		</form>
 	);
+}
+
+function RelaySettingsPanel({baseUrl, port, saving, onPortChange, onSubmit}) {
+    return (
+        <section className="mt-7 rounded-2xl border border-zinc-800 bg-zinc-950/30 p-5">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                    <h2 className="text-xl font-bold">网关服务</h2>
+                    <p className="mt-1 text-sm text-zinc-500">服务监听所有本机网卡，局域网设备可通过这台电脑的局域网 IP 访问。</p>
+                </div>
+                <span className="rounded-full border border-emerald-800 bg-emerald-950/30 px-3 py-1 text-xs font-semibold text-emerald-300">局域网已启用</span>
+            </div>
+            <form className="mt-5 flex flex-wrap items-end gap-3" onSubmit={onSubmit}>
+                <div className="w-full max-w-xs">
+                    <Field label="监听端口" type="number" value={port} onChange={onPortChange} placeholder="8718" />
+                </div>
+                <button
+                    className="rounded-xl bg-zinc-100 px-5 py-2.5 font-bold text-zinc-950 hover:bg-white disabled:cursor-wait disabled:opacity-60"
+                    type="submit"
+                    disabled={saving}
+                >
+                    {saving ? "正在重启网关…" : "保存并重启网关"}
+                </button>
+            </form>
+            <div className="mt-4 rounded-xl border border-zinc-800 bg-black/20 p-3 text-sm text-zinc-400">
+                <div>本机地址：<span className="font-mono text-zinc-200">{baseUrl || "启动中…"}</span></div>
+                <div className="mt-1 text-xs text-zinc-500">局域网客户端请将其中的 127.0.0.1 替换为本机局域网 IP，并确保 Windows 防火墙允许该端口的入站连接。</div>
+            </div>
+            <div className="mt-3 rounded-xl border border-amber-900/70 bg-amber-950/20 p-3 text-sm text-amber-200">
+                注意：当前 API Key 仅用于调用统计，不会拦截无效请求。请只在可信局域网使用，并通过防火墙限制可访问此端口的设备。
+            </div>
+        </section>
+    );
 }
 
 function UpdatePanel({appInfo, updateInfo, checking, installing, progress, compact = false, onCheck, onInstall, onSkip, onLater}) {

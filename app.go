@@ -6,11 +6,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"localrelay/internal/capabilities"
@@ -29,6 +33,7 @@ type App struct {
 	store       *store.Store
 	relay       *relay.Server
 	relayServer *http.Server
+	relayMu     sync.Mutex
 }
 
 // NewApp creates a new App application struct
@@ -46,10 +51,34 @@ func (a *App) startup(ctx context.Context) {
 	}
 	a.store = db
 	a.relay = relay.New(db)
-	a.relayServer = &http.Server{Addr: "127.0.0.1:8718", Handler: a.relay}
+	port, err := a.store.RelayPort()
+	if err != nil {
+		panic(err)
+	}
+	if err := a.startRelay(port); err != nil {
+		panic(fmt.Errorf("start relay gateway: %w", err))
+	}
+}
+
+func (a *App) startRelay(port int) error {
+	listener, err := listenRelay(port)
+	if err != nil {
+		return err
+	}
+	a.serveRelay(listener)
+	return nil
+}
+
+func listenRelay(port int) (net.Listener, error) {
+	return net.Listen("tcp", net.JoinHostPort("0.0.0.0", strconv.Itoa(port)))
+}
+
+func (a *App) serveRelay(listener net.Listener) {
+	server := &http.Server{Handler: a.relay}
+	a.relayServer = server
 	go func() {
-		if err := a.relayServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			panic(err)
+		if err := server.Serve(listener); err != nil && err != http.ErrServerClosed {
+			log.Printf("relay gateway stopped unexpectedly: %v", err)
 		}
 	}()
 }
@@ -221,7 +250,59 @@ func (a *App) TestProviderModel(providerID string, modelID string) (ProviderTest
 }
 
 func (a *App) RelayBaseURL() string {
-	return "http://127.0.0.1:8718"
+	port := store.DefaultRelayPort
+	if a.store != nil {
+		if saved, err := a.store.RelayPort(); err == nil {
+			port = saved
+		}
+	}
+	return fmt.Sprintf("http://127.0.0.1:%d", port)
+}
+
+// RelayPort returns the active gateway port selected in Settings.
+func (a *App) RelayPort() (int, error) {
+	return a.store.RelayPort()
+}
+
+// SetRelayPort applies a new gateway port. It reserves the new wildcard
+// listener before stopping the old server, so an unavailable port leaves the
+// current gateway untouched.
+func (a *App) SetRelayPort(port int) (int, error) {
+	if err := store.ValidateRelayPort(port); err != nil {
+		return 0, err
+	}
+
+	a.relayMu.Lock()
+	defer a.relayMu.Unlock()
+
+	current, err := a.store.RelayPort()
+	if err != nil {
+		return 0, err
+	}
+	if current == port {
+		return port, nil
+	}
+	listener, err := listenRelay(port)
+	if err != nil {
+		return 0, fmt.Errorf("port %d is unavailable: %w", port, err)
+	}
+	if err := a.store.SetRelayPort(port); err != nil {
+		_ = listener.Close()
+		return 0, err
+	}
+
+	if a.relayServer != nil {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		err = a.relayServer.Shutdown(shutdownCtx)
+		cancel()
+		if err != nil {
+			_ = a.store.SetRelayPort(current)
+			_ = listener.Close()
+			return 0, fmt.Errorf("stop existing relay gateway: %w", err)
+		}
+	}
+	a.serveRelay(listener)
+	return port, nil
 }
 
 func providerChatURL(base string) string {
