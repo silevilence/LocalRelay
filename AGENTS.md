@@ -8,8 +8,8 @@
 
 - 统一管理多个 LLM 提供商（Provider）及其下模型（Model）的配置。
 - 对外以统一接口转发请求到各提供商，支持以 `providerId/modelId` 的形式路由到具体模型。
-- 对外同时支持四种主流协议入口：**OpenAI Chat Completions**、**OpenAI Responses**、**Anthropic Messages**、**Google Gemini**。
-- 记录每次调用日志，支持按时间区间统计 Token 使用（输入/输出分别统计，支持缓存 Token 区分，视提供商能力而定）。
+- 对外规划支持四种主流协议入口：**OpenAI Chat Completions**、**OpenAI Responses**、**Anthropic Messages**、**Google Gemini**。当前仅实现 **OpenAI Chat Completions** 入站（`/v1/chat/completions`、`/v1/models`、`/healthz`），其余三种入站解析在 ROADMAP 计划中；出站（IR → 上游）四种协议均已实现。
+- 记录每次调用日志，支持按时间区间统计 Token 使用（输入/输出分别统计，支持缓存 Token 区分，视提供商能力而定）。上游成功响应但未返回 usage 时，网关按请求与响应内容本地估算 Token 并在日志/统计中标记 `token_estimated`，上游返回的 usage 始终优先。
 - 提供美观易用、指引明确的本地管理界面。
 
 ### 架构核心思路
@@ -17,7 +17,7 @@
 - 采用**内部统一格式（IR，Intermediate Representation）为中心的星形转换**，而非四种协议两两互转的网状转换：所有外部协议先转换为内部格式，再由内部格式转换为目标上游协议；对外响应同理，先转换为内部格式，再转换为对外协议格式。
 - 内部格式设计以 **Anthropic Messages 结构为蓝本**做适度扩展（block 化的 content 表达能力最强，其他协议可视为其降级映射）。
 - 流式（SSE）与非流式的内部格式**分别设计**，不假设可以互相简单派生。
-- 不同提供商在同一协议类型下的细节差异（思考开关字段、reasoning_effort 取值、思考内容是否回传、cache token 字段命名等）通过**可配置的"能力描述 + 适配器"层**解决，不硬编码 if-else，新增/调整某个提供商的怪异字段应尽量只改配置，不改核心转换逻辑。
+- 不同提供商在同一协议类型下的细节差异（思考开关字段、reasoning_effort 取值、思考内容是否回传、cache token 字段命名、流式是否需要 `stream_options.include_usage` 等）通过**可配置的"能力描述 + 适配器"层**解决，不硬编码 if-else，新增/调整某个提供商的怪异字段应尽量只改配置，不改核心转换逻辑。能力配置结构见 `internal/capabilities`（`Provider` 含 `Protocol` / `Thinking` / `ReasoningEffort` / `ToolCalls` / `Streaming`）。
 - 优先实现「OpenAI Chat → 内部格式」与「内部格式 → 各上游协议」，再逐步扩展「OpenAI Response / Anthropic / Google → 内部格式」。
 
 ## 技术栈约束
@@ -48,7 +48,7 @@
 - 遵循标准 Go 项目约定，使用 `gofmt` / `goimports` 格式化，提交前必须通过 `go vet`。
 - 错误处理使用显式 `error` 返回，禁止吞掉错误或用 panic 代替正常错误流程（除非是不可恢复的初始化错误）。
 - 涉及协议字段映射的结构体，字段命名与 JSON tag 需清晰标注对应的外部协议字段，避免"神秘字段"。
-- 各协议适配器应实现统一接口（如 `ToInternal` / `FromInternal`），新增供应商类型或预设时优先通过新增配置/实现文件完成，不修改已有适配器核心逻辑。
+- 各协议适配器应实现统一接口（IR ↔ 上游协议的 `ToProviderRequest` / `ParseResponse` / `FromIRResponse*` / `WriteStreamEvent` 等），新增供应商类型或预设时优先通过新增配置/实现文件完成，不修改已有适配器核心逻辑。
 - 日志、统计相关代码需保证不因单次调用失败而影响主流程稳定性（如统计写入失败不应导致请求失败）。
 
 ### 前端
