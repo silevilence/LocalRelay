@@ -16,6 +16,20 @@ export namespace main {
 	        this.installScope = source["installScope"];
 	    }
 	}
+	export class ProviderModel {
+	    id: string;
+	    name: string;
+
+	    static createFrom(source: any = {}) {
+	        return new ProviderModel(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.name = source["name"];
+	    }
+	}
 	export class ProviderTestResult {
 	    model: string;
 	    content: string;
@@ -127,6 +141,7 @@ export namespace store {
 	    outputTokens: number;
 	    cacheCreationInputTokens: number;
 	    cacheReadInputTokens: number;
+	    tokenEstimated: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new CallLog(source);
@@ -149,6 +164,7 @@ export namespace store {
 	        this.outputTokens = source["outputTokens"];
 	        this.cacheCreationInputTokens = source["cacheCreationInputTokens"];
 	        this.cacheReadInputTokens = source["cacheReadInputTokens"];
+	        this.tokenEstimated = source["tokenEstimated"];
 	    }
 	}
 	export class CallLogPage {
@@ -330,6 +346,7 @@ export namespace store {
 	    cacheCreationInputTokens: number;
 	    cacheReadInputTokens: number;
 	    calls: number;
+	    estimatedCalls: number;
 	
 	    static createFrom(source: any = {}) {
 	        return new TokenStatPoint(source);
@@ -343,6 +360,7 @@ export namespace store {
 	        this.cacheCreationInputTokens = source["cacheCreationInputTokens"];
 	        this.cacheReadInputTokens = source["cacheReadInputTokens"];
 	        this.calls = source["calls"];
+	        this.estimatedCalls = source["estimatedCalls"];
 	    }
 	}
 	export class TokenStatRow {
@@ -377,6 +395,7 @@ export namespace store {
 	    cacheCreationInputTokens: number;
 	    cacheReadInputTokens: number;
 	    calls: number;
+	    estimatedCalls: number;
 	    points: TokenStatPoint[];
 	
 	    static createFrom(source: any = {}) {
@@ -390,6 +409,7 @@ export namespace store {
 	        this.cacheCreationInputTokens = source["cacheCreationInputTokens"];
 	        this.cacheReadInputTokens = source["cacheReadInputTokens"];
 	        this.calls = source["calls"];
+	        this.estimatedCalls = source["estimatedCalls"];
 	        this.points = this.convertValues(source["points"], TokenStatPoint);
 	    }
 	
@@ -457,4 +477,3 @@ export namespace store {
 	}
 
 }
-

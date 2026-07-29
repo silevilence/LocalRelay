@@ -138,6 +138,62 @@ func (a *App) DeleteModel(providerID string, id string) error {
 	return a.store.DeleteModel(providerID, id)
 }
 
+// ProviderModel is a model advertised by an upstream provider. It is not
+// persisted until the user explicitly selects it in the UI.
+type ProviderModel struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+func (a *App) FetchProviderModels(providerID string) ([]ProviderModel, error) {
+	providers, err := a.store.ListProviders()
+	if err != nil {
+		return nil, err
+	}
+	var provider *store.Provider
+	for i := range providers {
+		if providers[i].ID == strings.TrimSpace(providerID) {
+			provider = &providers[i]
+			break
+		}
+	}
+	if provider == nil {
+		return nil, fmt.Errorf("provider %q was not found", providerID)
+	}
+	cfg, err := capabilities.Parse(provider.CapabilityConfig)
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequest(http.MethodGet, providerModelsURL(provider.BaseURL, cfg.Protocol), nil)
+	if err != nil {
+		return nil, err
+	}
+	if provider.APIKey != "" {
+		switch cfg.Protocol {
+		case capabilities.ProtocolGemini:
+			req.Header.Set("X-Goog-Api-Key", provider.APIKey)
+		case capabilities.ProtocolAnthropic:
+			req.Header.Set("X-Api-Key", provider.APIKey)
+			req.Header.Set("Anthropic-Version", "2023-06-01")
+		default:
+			req.Header.Set("Authorization", "Bearer "+provider.APIKey)
+		}
+	}
+	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return nil, fmt.Errorf("upstream returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	return parseProviderModels(body)
+}
+
 func (a *App) ListAPIKeys() ([]store.APIKey, error) {
 	return a.store.ListAPIKeys()
 }
@@ -307,6 +363,55 @@ func (a *App) SetRelayPort(port int) (int, error) {
 
 func providerChatURL(base string) string {
 	return providerURL(base, capabilities.ProtocolOpenAIChat, "", false)
+}
+
+func providerModelsURL(base string, protocol string) string {
+	base = strings.TrimRight(strings.TrimSpace(base), "/")
+	for _, suffix := range []string{"/chat/completions", "/responses", "/messages"} {
+		base = strings.TrimSuffix(base, suffix)
+	}
+	return base + "/models"
+}
+
+func parseProviderModels(data []byte) ([]ProviderModel, error) {
+	var response struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+		Models []struct {
+			Name        string `json:"name"`
+			DisplayName string `json:"displayName"`
+		} `json:"models"`
+	}
+	if err := json.Unmarshal(data, &response); err != nil {
+		return nil, err
+	}
+	seen := make(map[string]struct{})
+	models := make([]ProviderModel, 0, len(response.Data)+len(response.Models))
+	add := func(id, name string) {
+		id = strings.TrimPrefix(strings.TrimSpace(id), "models/")
+		if id == "" {
+			return
+		}
+		if _, exists := seen[id]; exists {
+			return
+		}
+		seen[id] = struct{}{}
+		if strings.TrimSpace(name) == "" {
+			name = id
+		}
+		models = append(models, ProviderModel{ID: id, Name: name})
+	}
+	for _, model := range response.Data {
+		add(model.ID, model.ID)
+	}
+	for _, model := range response.Models {
+		add(model.Name, model.DisplayName)
+	}
+	if len(models) == 0 {
+		return nil, fmt.Errorf("upstream response does not contain a supported model list")
+	}
+	return models, nil
 }
 
 func providerURL(base string, protocol string, model string, stream bool) string {

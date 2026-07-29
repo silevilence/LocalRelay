@@ -25,6 +25,11 @@ type Request struct {
 	Thinking         json.RawMessage `json:"thinking,omitempty"`
 	EnableThinking   *bool           `json:"enable_thinking,omitempty"`
 	ThinkingBudget   *int            `json:"thinking_budget,omitempty"`
+	StreamOptions    *StreamOptions  `json:"stream_options,omitempty"`
+}
+
+type StreamOptions struct {
+	IncludeUsage bool `json:"include_usage,omitempty"`
 }
 
 type Message struct {
@@ -321,6 +326,9 @@ func ToProviderRequest(req ir.Request, cfg capabilities.Provider) (Request, erro
 }
 
 func applyConfiguredFields(out *Request, req ir.Request, cfg capabilities.Provider) error {
+	if req.Stream && cfg.Streaming.IncludeUsage {
+		out.StreamOptions = &StreamOptions{IncludeUsage: true}
+	}
 	if req.Params.ReasoningEffort != nil {
 		if !cfg.SupportsReasoningEffort(*req.Params.ReasoningEffort) {
 			return cfg.UnsupportedFieldError("reasoning_effort")

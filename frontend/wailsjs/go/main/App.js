@@ -38,6 +38,10 @@ export function DeleteProvider(arg1) {
   return window['go']['main']['App']['DeleteProvider'](arg1);
 }
 
+export function FetchProviderModels(arg1) {
+  return window['go']['main']['App']['FetchProviderModels'](arg1);
+}
+
 export function Greet(arg1) {
   return window['go']['main']['App']['Greet'](arg1);
 }

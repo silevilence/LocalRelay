@@ -27,9 +27,9 @@ func BuiltinProviderPresets() []ProviderPreset {
 		{
 			ID:               "volcengine-coding",
 			Name:             "火山引擎 Coding Plan",
-			Type:             "openai-compatible",
+			Type:             "volcengine-coding",
 			BaseURL:          "https://ark.cn-beijing.volces.com/api/coding/v3",
-			CapabilityConfig: capabilities.DefaultJSON("openai-compatible"),
+			CapabilityConfig: capabilities.DefaultJSON("volcengine-coding"),
 			Models: []ModelInput{
 				{ID: "ark-code-latest", Name: "Ark Code Latest", Capabilities: `{"tools":true,"stream":true}`, ContextLength: 262144, MaxTokens: 32768},
 			},

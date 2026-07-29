@@ -167,7 +167,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 			writeError(w, status, "streaming_unavailable", log.Error)
 			return
 		}
-		if err := s.streamProviderResponse(r.Context(), w, upstreamResp.Body, providerCapabilities, routed.Provider.ID+"/"+routed.Model.ID, &log); err != nil {
+		if err := s.streamProviderResponse(r.Context(), w, upstreamResp.Body, providerCapabilities, routed.Provider.ID+"/"+routed.Model.ID, irReq, &log); err != nil {
 			log.Error = err.Error()
 			if errors.Is(err, context.Canceled) {
 				status = statusClientClosedRequest
@@ -201,6 +201,10 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	irResp.Model = routed.Provider.ID + "/" + routed.Model.ID
+	if irResp.Usage == (ir.Usage{}) {
+		irResp.Usage = estimateResponseUsage(irReq, irResp)
+		log.TokenEstimated = true
+	}
 	log.InputTokens = irResp.Usage.InputTokens
 	log.OutputTokens = irResp.Usage.OutputTokens
 	log.CacheCreationInputTokens = irResp.Usage.CacheCreationInputTokens
@@ -216,7 +220,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, status, clientResp)
 }
 
-func (s *Server) streamProviderResponse(ctx context.Context, w http.ResponseWriter, body io.Reader, cfg capabilities.Provider, model string, log *store.CallLog) error {
+func (s *Server) streamProviderResponse(ctx context.Context, w http.ResponseWriter, body io.Reader, cfg capabilities.Provider, model string, request ir.Request, log *store.CallLog) error {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		return errors.New("streaming is not supported by response writer")
@@ -226,7 +230,10 @@ func (s *Server) streamProviderResponse(ctx context.Context, w http.ResponseWrit
 	w.Header().Set("X-Accel-Buffering", "no")
 	w.WriteHeader(http.StatusOK)
 	flusher.Flush()
-	return forEachProviderStreamEvent(body, cfg, func(event ir.StreamEvent) error {
+	var output strings.Builder
+	hasUsage := false
+	hasStreamError := false
+	err := forEachProviderStreamEvent(body, cfg, func(event ir.StreamEvent) error {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -234,10 +241,18 @@ func (s *Server) streamProviderResponse(ctx context.Context, w http.ResponseWrit
 		}
 		event.Model = model
 		if event.Usage != (ir.Usage{}) {
+			hasUsage = true
 			log.InputTokens = event.Usage.InputTokens
 			log.OutputTokens = event.Usage.OutputTokens
 			log.CacheCreationInputTokens = event.Usage.CacheCreationInputTokens
 			log.CacheReadInputTokens = event.Usage.CacheReadInputTokens
+		}
+		if event.Type == ir.StreamContentBlockDelta {
+			output.WriteString(event.Delta)
+			output.WriteString(event.ArgumentsDelta)
+		}
+		if event.Type == ir.StreamError {
+			hasStreamError = true
 		}
 		if err := openaichat.WriteStreamEvent(w, event, cfg); err != nil {
 			return err
@@ -250,6 +265,13 @@ func (s *Server) streamProviderResponse(ctx context.Context, w http.ResponseWrit
 		}
 		return nil
 	})
+	if err == nil && !hasUsage && !hasStreamError {
+		usage := estimateStreamUsage(request, output.String())
+		log.InputTokens = usage.InputTokens
+		log.OutputTokens = usage.OutputTokens
+		log.TokenEstimated = true
+	}
+	return err
 }
 
 func (s *Server) queueLog(log store.CallLog) {

@@ -21,6 +21,8 @@ export function DeleteModel(arg1:string,arg2:string):Promise<void>;
 
 export function DeleteProvider(arg1:string):Promise<void>;
 
+export function FetchProviderModels(arg1:string):Promise<Array<main.ProviderModel>>;
+
 export function Greet(arg1:string):Promise<string>;
 
 export function InstallUpdate(arg1:string):Promise<void>;

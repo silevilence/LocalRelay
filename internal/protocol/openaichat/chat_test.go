@@ -32,6 +32,28 @@ func TestParseTextChatToIR(t *testing.T) {
 	}
 }
 
+func TestProviderRequestIncludesStreamingUsageWhenConfigured(t *testing.T) {
+	cfg, err := capabilities.Parse(`{"protocol":"openai_chat","streaming":{"includeUsage":true}}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, err := ToProviderRequest(ir.Request{
+		Model:    "ark-code-latest",
+		Stream:   true,
+		Messages: []ir.Message{{Role: ir.RoleUser, Content: []ir.ContentBlock{ir.Text("ping")}}},
+	}, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), `"stream_options":{"include_usage":true}`) {
+		t.Fatalf("stream usage option missing from %s", body)
+	}
+}
+
 func TestParseToolsAndToolCallsToIR(t *testing.T) {
 	raw := []byte(`{
 		"model":"gpt-4.1-mini",

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"localrelay/internal/capabilities"
+	"localrelay/internal/ir"
 	"localrelay/internal/store"
 )
 
@@ -111,19 +112,154 @@ func TestChatCompletionRelayAndLogs(t *testing.T) {
 	}
 }
 
+func TestChatCompletionRelayFallsBackToEstimatedUsage(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"model":"gpt-test","choices":[{"index":0,"message":{"role":"assistant","content":"pong"},"finish_reason":"stop"}]}`))
+	}))
+	defer upstream.Close()
+
+	s := openRelayStore(t)
+	defer s.Close()
+	if _, err := s.CreateProvider(store.ProviderInput{ID: "p1", Name: "P1", Type: "openai", BaseURL: upstream.URL + "/v1"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CreateModel(store.ModelInput{ID: "gpt-test", ProviderID: "p1", Name: "GPT Test"}); err != nil {
+		t.Fatal(err)
+	}
+
+	relay := New(s)
+	server := httptest.NewServer(relay)
+	resp, err := http.Post(server.URL+"/v1/chat/completions", "application/json", bytes.NewBufferString(`{
+		"model":"p1/gpt-test",
+		"messages":[{"role":"user","content":"please reply with pong"}]
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	server.Close()
+	relay.Close()
+
+	stats, err := s.TokenStats(store.TokenStatsFilter{ProviderID: "p1", ModelID: "gpt-test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Calls != 1 || stats.EstimatedCalls != 1 || stats.InputTokens == 0 || stats.OutputTokens == 0 {
+		t.Fatalf("fallback stats = %#v", stats)
+	}
+	logs, err := s.CallLogs(store.TokenStatsFilter{ProviderID: "p1", ModelID: "gpt-test"}, 1, 50)
+	if err != nil || len(logs.Items) != 1 || !logs.Items[0].TokenEstimated {
+		t.Fatalf("fallback logs = %#v, %v", logs, err)
+	}
+}
+
+func TestChatCompletionStreamFallsBackToEstimatedUsage(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, strings.Join([]string{
+			`data: {"id":"stream_1","choices":[{"index":0,"delta":{"role":"assistant"}}]}`,
+			``,
+			`data: {"id":"stream_1","choices":[{"index":0,"delta":{"content":"pong"}}]}`,
+			``,
+			`data: {"id":"stream_1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+			``,
+			`data: [DONE]`,
+			``,
+		}, "\n"))
+	}))
+	defer upstream.Close()
+
+	s := openRelayStore(t)
+	defer s.Close()
+	if _, err := s.CreateProvider(store.ProviderInput{ID: "p1", Name: "P1", Type: "openai", BaseURL: upstream.URL + "/v1"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CreateModel(store.ModelInput{ID: "gpt-test", ProviderID: "p1", Name: "GPT Test"}); err != nil {
+		t.Fatal(err)
+	}
+	relay := New(s)
+	server := httptest.NewServer(relay)
+	resp, err := http.Post(server.URL+"/v1/chat/completions", "application/json", bytes.NewBufferString(`{
+		"model":"p1/gpt-test",
+		"stream":true,
+		"messages":[{"role":"user","content":"please reply with pong"}]
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	server.Close()
+	relay.Close()
+
+	stats, err := s.TokenStats(store.TokenStatsFilter{ProviderID: "p1", ModelID: "gpt-test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Calls != 1 || stats.EstimatedCalls != 1 || stats.InputTokens == 0 || stats.OutputTokens == 0 {
+		t.Fatalf("stream fallback stats = %#v", stats)
+	}
+}
+
+func TestProviderStreamUsageMappings(t *testing.T) {
+	tests := []struct {
+		name     string
+		protocol string
+		stream   string
+	}{
+		{
+			name:     "anthropic messages",
+			protocol: capabilities.ProtocolAnthropic,
+			stream:   "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"input_tokens\":2,\"output_tokens\":1}}\n\n",
+		},
+		{
+			name:     "gemini",
+			protocol: capabilities.ProtocolGemini,
+			stream:   "data: {\"candidates\":[{\"index\":0,\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"pong\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":2,\"candidatesTokenCount\":1}}\n\n",
+		},
+		{
+			name:     "openai responses",
+			protocol: capabilities.ProtocolOpenAIResponse,
+			stream:   "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":2,\"output_tokens\":1}}}\n\n",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var usage ir.Usage
+			err := forEachProviderStreamEvent(strings.NewReader(tt.stream), capabilities.Provider{Protocol: tt.protocol}, func(event ir.StreamEvent) error {
+				if event.Usage != (ir.Usage{}) {
+					usage = event.Usage
+				}
+				return nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if usage.InputTokens != 2 || usage.OutputTokens != 1 {
+				t.Fatalf("usage = %#v", usage)
+			}
+		})
+	}
+}
+
 func TestChatCompletionStreamRelayAndLogs(t *testing.T) {
 	var upstreamModel string
 	var upstreamStream bool
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			Model  string `json:"model"`
-			Stream bool   `json:"stream"`
+			Model         string `json:"model"`
+			Stream        bool   `json:"stream"`
+			StreamOptions struct {
+				IncludeUsage bool `json:"include_usage"`
+			} `json:"stream_options"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			t.Fatal(err)
 		}
 		upstreamModel = req.Model
-		upstreamStream = req.Stream
+		upstreamStream = req.Stream && req.StreamOptions.IncludeUsage
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = io.WriteString(w, strings.Join([]string{
 			`data: {"id":"chatcmpl_stream","model":"gpt-test","choices":[{"index":0,"delta":{"role":"assistant"}}]}`,
@@ -142,7 +278,7 @@ func TestChatCompletionStreamRelayAndLogs(t *testing.T) {
 
 	s := openRelayStore(t)
 	defer s.Close()
-	if _, err := s.CreateProvider(store.ProviderInput{ID: "p1", Name: "P1", Type: "openai", BaseURL: upstream.URL + "/v1"}); err != nil {
+	if _, err := s.CreateProvider(store.ProviderInput{ID: "p1", Name: "P1", Type: "volcengine-coding", BaseURL: upstream.URL + "/v1"}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.CreateModel(store.ModelInput{ID: "gpt-test", ProviderID: "p1", Name: "GPT Test"}); err != nil {
@@ -344,7 +480,7 @@ func TestStreamProviderResponseStopsOnClientCancel(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	err = (&Server{}).streamProviderResponse(ctx, httptest.NewRecorder(), strings.NewReader("data: [DONE]\n\n"), cfg, "p1/gpt-test", &store.CallLog{})
+	err = (&Server{}).streamProviderResponse(ctx, httptest.NewRecorder(), strings.NewReader("data: [DONE]\n\n"), cfg, "p1/gpt-test", ir.Request{}, &store.CallLog{})
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("stream err = %v", err)
 	}
@@ -389,7 +525,7 @@ func TestStreamProviderResponseReturnsWriteError(t *testing.T) {
 	err = (&Server{}).streamProviderResponse(context.Background(), failWriteFlusher{header: http.Header{}, err: writeErr}, strings.NewReader(strings.Join([]string{
 		`data: {"id":"chatcmpl_1","model":"gpt-test","choices":[{"index":0,"delta":{"content":"x"}}]}`,
 		``,
-	}, "\n")), cfg, "p1/gpt-test", &store.CallLog{})
+	}, "\n")), cfg, "p1/gpt-test", ir.Request{}, &store.CallLog{})
 	if !errors.Is(err, writeErr) {
 		t.Fatalf("stream err = %v", err)
 	}

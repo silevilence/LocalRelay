@@ -10,6 +10,7 @@ import {
     DeleteAPIKey,
     DeleteModel,
     DeleteProvider,
+	FetchProviderModels,
     ListAPIKeys,
     ListModels,
     ListProviderPresets,
@@ -45,6 +46,7 @@ const providerProtocolOptions = [
 const providerTypeOptions = [
     ["openai", "OpenAI"],
     ["openai-compatible", "OpenAI 兼容"],
+    ["volcengine-coding", "火山引擎 Coding Plan"],
     ["deepseek", "DeepSeek"],
     ["siliconflow", "硅基流动"],
     ["anthropic", "Anthropic"],
@@ -71,6 +73,11 @@ function App() {
     const [isAddingProvider, setIsAddingProvider] = useState(false);
     const [editingModel, setEditingModel] = useState(false);
     const [showModelForm, setShowModelForm] = useState(false);
+	const [showModelPicker, setShowModelPicker] = useState(false);
+	const [fetchedModels, setFetchedModels] = useState([]);
+	const [selectedFetchedModelIds, setSelectedFetchedModelIds] = useState({});
+	const [fetchingModels, setFetchingModels] = useState(false);
+	const [addingFetchedModels, setAddingFetchedModels] = useState(false);
     const [showProviderTest, setShowProviderTest] = useState(false);
     const [testModelId, setTestModelId] = useState("");
     const [testResult, setTestResult] = useState(null);
@@ -86,7 +93,7 @@ function App() {
     const [statsFilter, setStatsFilter] = useState({from: daysAgo(7), to: today(), providerId: "", modelId: "", appName: ""});
     const [statsModelOptions, setStatsModelOptions] = useState([]);
     const [statsAppOptions, setStatsAppOptions] = useState([]);
-    const [stats, setStats] = useState({points: [], calls: 0, inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0});
+    const [stats, setStats] = useState({points: [], calls: 0, estimatedCalls: 0, inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0});
     const [statRows, setStatRows] = useState({provider: [], model: [], app: []});
     const [trendRows, setTrendRows] = useState([]);
     const [logPage, setLogPage] = useState({items: [], total: 0});
@@ -363,6 +370,49 @@ function App() {
         setModelDraft({...emptyModel, providerId: selectedProviderId});
         setEditingModel(false);
         setShowModelForm(true);
+    }
+
+    async function fetchProviderModels() {
+        if (!selectedProviderId) return;
+        setFetchingModels(true);
+        try {
+            const items = await FetchProviderModels(selectedProviderId);
+            setFetchedModels(items || []);
+            setSelectedFetchedModelIds({});
+            setShowModelPicker(true);
+        } catch (error) {
+            setMessage(`获取上游模型失败：${error}`);
+        } finally {
+            setFetchingModels(false);
+        }
+    }
+
+    async function addFetchedModels() {
+        const existing = new Set(models.map((model) => model.id));
+        const selected = fetchedModels.filter((model) => selectedFetchedModelIds[model.id] && !existing.has(model.id));
+        if (!selected.length) {
+            setMessage("请至少勾选一个尚未添加的模型。");
+            return;
+        }
+        setAddingFetchedModels(true);
+        const failed = [];
+        for (const model of selected) {
+            try {
+                await CreateModel({id: model.id, providerId: selectedProviderId, name: model.name || model.id, capabilities: "", contextLength: 0, maxTokens: 0, enabled: true});
+            } catch (error) {
+                failed.push(`${model.id}: ${error}`);
+            }
+        }
+        await refreshModels(selectedProviderId);
+        setAddingFetchedModels(false);
+        if (failed.length) {
+            setMessage(`已添加 ${selected.length - failed.length} 个模型；${failed.length} 个失败：${failed.join("；")}`);
+            return;
+        }
+        setShowModelPicker(false);
+        const success = `已添加 ${selected.length} 个模型。`;
+        setMessage(success);
+        notify(success);
     }
 
     function editModel(model) {
@@ -706,11 +756,12 @@ function App() {
                                                 </div>
                                                 <div className="flex overflow-hidden rounded-xl border border-zinc-700">
                                                     <button
-                                                        className="px-4 py-2 font-semibold text-zinc-100 hover:bg-zinc-900"
+                                                        className="px-4 py-2 font-semibold text-zinc-100 hover:bg-zinc-900 disabled:cursor-wait disabled:opacity-60"
                                                         type="button"
-                                                        onClick={() => setMessage("获取模型列表尚未接入上游 API；请先手动添加。")}
+                                                        disabled={fetchingModels}
+                                                        onClick={fetchProviderModels}
                                                     >
-                                                        ⟳ 获取模型列表
+                                                        {fetchingModels ? "正在获取…" : "⟳ 获取模型列表"}
                                                     </button>
                                                     <button className="border-l border-zinc-700 px-4 py-2 text-xl hover:bg-zinc-900" type="button" onClick={startAddModel}>＋</button>
                                                 </div>
@@ -755,6 +806,20 @@ function App() {
                             setShowModelForm(false);
                             setEditingModel(false);
                         }}
+                    />
+                </Modal>
+            )}
+            {showModelPicker && (
+                <Modal title="选择要添加的上游模型" onClose={() => setShowModelPicker(false)}>
+                    <ModelPicker
+                        models={fetchedModels}
+                        existingIds={new Set(models.map((model) => model.id))}
+                        selectedIds={selectedFetchedModelIds}
+                        adding={addingFetchedModels}
+                        onToggle={(id) => setSelectedFetchedModelIds((current) => ({...current, [id]: !current[id]}))}
+                        onSelectNew={() => setSelectedFetchedModelIds(Object.fromEntries(fetchedModels.filter((model) => !models.some((item) => item.id === model.id)).map((model) => [model.id, true])))}
+                        onClear={() => setSelectedFetchedModelIds({})}
+                        onConfirm={addFetchedModels}
                     />
                 </Modal>
             )}
@@ -968,6 +1033,40 @@ function ModelForm({draft, editing, onChange, onSubmit, onCancel}) {
                 <button className="rounded-xl bg-zinc-100 px-4 py-2 font-bold text-zinc-950" type="submit">{editing ? "更新" : "添加"}</button>
             </div>
         </form>
+    );
+}
+
+function ModelPicker({models, existingIds, selectedIds, adding, onToggle, onSelectNew, onClear, onConfirm}) {
+    const selectedCount = models.filter((model) => selectedIds[model.id] && !existingIds.has(model.id)).length;
+    return (
+        <div className="space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-sky-900/60 bg-sky-950/20 px-4 py-3 text-sm text-sky-100">
+                <span>已从上游获取 {models.length} 个模型；只会添加你勾选的项目。</span>
+                <div className="flex gap-2 text-xs font-bold">
+                    <button className="rounded-lg border border-sky-700/70 px-2.5 py-1 hover:bg-sky-950" type="button" onClick={onSelectNew}>全选未添加</button>
+                    <button className="rounded-lg border border-zinc-700 px-2.5 py-1 text-zinc-300 hover:bg-zinc-800" type="button" onClick={onClear}>清除选择</button>
+                </div>
+            </div>
+            <div className="max-h-[48vh] divide-y divide-zinc-800 overflow-y-auto rounded-2xl border border-zinc-800 bg-zinc-950/30">
+                {models.map((model) => {
+                    const exists = existingIds.has(model.id);
+                    return (
+                        <label key={model.id} className={`flex cursor-pointer items-center gap-3 px-4 py-3 ${exists ? "cursor-not-allowed opacity-45" : "hover:bg-zinc-900/70"}`}>
+                            <input type="checkbox" checked={exists || Boolean(selectedIds[model.id])} disabled={exists || adding} onChange={() => onToggle(model.id)} />
+                            <span className="min-w-0 flex-1">
+                                <span className="block truncate font-mono text-sm text-zinc-100">{model.id}</span>
+                                {model.name && model.name !== model.id && <span className="mt-0.5 block truncate text-xs text-zinc-500">{model.name}</span>}
+                            </span>
+                            {exists && <span className="rounded-full border border-zinc-700 px-2 py-0.5 text-xs font-bold text-zinc-400">已添加</span>}
+                        </label>
+                    );
+                })}
+            </div>
+            <div className="flex items-center justify-between gap-3 border-t border-zinc-800 pt-4">
+                <span className="text-sm text-zinc-500">已选择 {selectedCount} 个新模型</span>
+                <button className="rounded-xl bg-zinc-100 px-4 py-2 font-bold text-zinc-950 disabled:cursor-wait disabled:opacity-60" type="button" disabled={adding || selectedCount === 0} onClick={onConfirm}>{adding ? "正在添加…" : `确认添加${selectedCount ? ` (${selectedCount})` : ""}`}</button>
+            </div>
+        </div>
     );
 }
 
@@ -1277,6 +1376,13 @@ function StatsPanel({baseUrl, stats, statRows, trendRows, logPage, logPageNum, t
                 <StatCard label="缓存命中" value={stats.cacheReadInputTokens || 0} />
             </div>
 
+            {stats.estimatedCalls > 0 && (
+                <div className="mt-4 flex items-start gap-3 rounded-xl border border-amber-800/70 bg-amber-950/25 px-4 py-3 text-sm text-amber-100">
+                    <span className="mt-0.5 text-base">≈</span>
+                    <span>当前筛选包含 {stats.estimatedCalls} 次本地估算的 Token 用量。上游未返回 usage 时会按文本与请求内容近似计算，图表和汇总已包含这些估算值。</span>
+                </div>
+            )}
+
             <div className="mt-4 flex flex-wrap gap-3 text-xs text-zinc-400">
                 <Legend color="bg-emerald-500" label="非缓存输入" />
                 <Legend color="bg-sky-500" label="输出" />
@@ -1368,10 +1474,10 @@ function EChart({option, empty}) {
 function CallLogTable({items}) {
     return (
         <div className="overflow-x-auto">
-            <table className="w-full min-w-[1100px] text-left text-sm">
+            <table className="w-full min-w-[1180px] text-left text-sm">
                 <thead className="bg-zinc-900/70 text-xs text-zinc-500">
                     <tr>
-                        {["调用时间", "提供商", "模型", "应用", "输入", "输出", "缓存命中", "状态码", "协议", "耗时ms", "流式", "错误信息"].map((label) => <th key={label} className="px-3 py-3">{label}</th>)}
+                        {["调用时间", "提供商", "模型", "应用", "输入", "输出", "来源", "缓存命中", "状态码", "协议", "耗时ms", "流式", "错误信息"].map((label) => <th key={label} className="px-3 py-3">{label}</th>)}
                     </tr>
                 </thead>
                 <tbody className="divide-y divide-zinc-800">
@@ -1383,6 +1489,7 @@ function CallLogTable({items}) {
                             <td className="px-3 py-3 text-zinc-300">{item.appName || "无应用"}</td>
                             <td className="px-3 py-3">{fmt(item.inputTokens)}</td>
                             <td className="px-3 py-3">{fmt(item.outputTokens)}</td>
+                            <td className="px-3 py-3"><span className={`rounded-full px-2 py-0.5 text-xs font-bold ${item.tokenEstimated ? "bg-amber-950 text-amber-300" : "bg-emerald-950 text-emerald-300"}`}>{item.tokenEstimated ? "本地估算" : "上游"}</span></td>
                             <td className="px-3 py-3">{fmt(item.cacheReadInputTokens)}</td>
                             <td className="px-3 py-3">{item.statusCode || "—"}</td>
                             <td className="px-3 py-3 text-zinc-400">{item.protocol}</td>
@@ -1391,7 +1498,7 @@ function CallLogTable({items}) {
                             <td className="max-w-[280px] truncate px-3 py-3 text-red-300" title={item.error}>{item.error || "—"}</td>
                         </tr>
                     ))}
-                    {!items.length && <tr><td className="px-4 py-8 text-center text-zinc-500" colSpan="12">暂无调用日志。</td></tr>}
+                    {!items.length && <tr><td className="px-4 py-8 text-center text-zinc-500" colSpan="13">暂无调用日志。</td></tr>}
                 </tbody>
             </table>
         </div>
@@ -1563,7 +1670,7 @@ async function exportFilteredLogs(filter) {
 }
 
 function exportLogsCSV(items) {
-    const headers = ["调用时间", "提供商", "模型", "应用", "输入", "输出", "缓存命中", "状态码", "协议", "耗时ms", "是否流式", "错误信息"];
+    const headers = ["调用时间", "提供商", "模型", "应用", "输入", "输出", "Token 来源", "缓存命中", "状态码", "协议", "耗时ms", "是否流式", "错误信息"];
     const rows = items.map((item) => [
         item.startedAt,
         item.providerId,
@@ -1571,6 +1678,7 @@ function exportLogsCSV(items) {
         item.appName || "无应用",
         item.inputTokens,
         item.outputTokens,
+        item.tokenEstimated ? "本地估算" : "上游",
         item.cacheReadInputTokens,
         item.statusCode,
         item.protocol,
@@ -1622,6 +1730,7 @@ function ProviderCapabilityEditor({value, onChange}) {
     const thinking = cfg.thinking || {};
     const reasoningEffort = cfg.reasoningEffort || {};
     const toolCalls = cfg.toolCalls || {};
+    const streaming = cfg.streaming || {};
     const preview = formatJSON(cleanProviderCapability(cfg));
 
     function update(patch) {
@@ -1701,6 +1810,16 @@ function ProviderCapabilityEditor({value, onChange}) {
                     />
                     工具调用时补齐 assistant content
                 </label>
+
+                <label className="flex items-center gap-2 text-sm font-semibold text-zinc-300">
+                    <input
+                        type="checkbox"
+                        checked={streaming.includeUsage === true}
+                        onChange={(event) => update({streaming: {includeUsage: event.target.checked}})}
+                    />
+                    流式响应请求 Token 用量
+                </label>
+                <p className="-mt-2 text-xs text-zinc-500">启用后发送 <code className="font-mono text-zinc-400">stream_options.include_usage</code>，用于接收流式尾包的 Token 统计。</p>
 
                 <details className="rounded-xl border border-zinc-800 bg-black/20">
                     <summary className="cursor-pointer px-4 py-3 text-sm font-semibold text-zinc-300">查看最终 JSON 配置</summary>
@@ -2003,6 +2122,7 @@ function cleanProviderCapability(cfg) {
             valueMap: cleanObject(cfg.reasoningEffort?.valueMap || {}),
         }),
         toolCalls: cleanObject(cfg.toolCalls || {}),
+		streaming: cleanObject(cfg.streaming || {}),
     });
 }
 

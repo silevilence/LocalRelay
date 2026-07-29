@@ -53,6 +53,35 @@ func TestProviderModelTestSendsChatRequest(t *testing.T) {
 	}
 }
 
+func TestFetchProviderModelsUsesOpenAIListEndpoint(t *testing.T) {
+	var auth string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/models" {
+			t.Fatalf("request = %s %s", r.Method, r.URL.Path)
+		}
+		auth = r.Header.Get("Authorization")
+		_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"ark-code-latest"},{"id":"doubao-seed-code"}]}`))
+	}))
+	defer upstream.Close()
+
+	s, err := store.Open(filepath.Join(t.TempDir(), "localrelay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if _, err := s.CreateProvider(store.ProviderInput{ID: "volc", Name: "Volc", Type: "openai-compatible", BaseURL: upstream.URL + "/v1", APIKey: "sk-test"}); err != nil {
+		t.Fatal(err)
+	}
+
+	models, err := (&App{store: s}).FetchProviderModels("volc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if auth != "Bearer sk-test" || len(models) != 2 || models[0].ID != "ark-code-latest" || models[1].ID != "doubao-seed-code" {
+		t.Fatalf("models=%#v auth=%q", models, auth)
+	}
+}
+
 func TestRelayGatewayUsesWildcardListenerAndCanChangePort(t *testing.T) {
 	s, err := store.Open(filepath.Join(t.TempDir(), "localrelay.db"))
 	if err != nil {

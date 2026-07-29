@@ -8,6 +8,7 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -120,6 +121,7 @@ type CallLog struct {
 	OutputTokens             int    `json:"outputTokens"`
 	CacheCreationInputTokens int    `json:"cacheCreationInputTokens"`
 	CacheReadInputTokens     int    `json:"cacheReadInputTokens"`
+	TokenEstimated           bool   `json:"tokenEstimated"`
 }
 
 type TokenStatsFilter struct {
@@ -136,6 +138,7 @@ type TokenStats struct {
 	CacheCreationInputTokens int              `json:"cacheCreationInputTokens"`
 	CacheReadInputTokens     int              `json:"cacheReadInputTokens"`
 	Calls                    int              `json:"calls"`
+	EstimatedCalls           int              `json:"estimatedCalls"`
 	Points                   []TokenStatPoint `json:"points"`
 }
 
@@ -146,6 +149,7 @@ type TokenStatPoint struct {
 	CacheCreationInputTokens int    `json:"cacheCreationInputTokens"`
 	CacheReadInputTokens     int    `json:"cacheReadInputTokens"`
 	Calls                    int    `json:"calls"`
+	EstimatedCalls           int    `json:"estimatedCalls"`
 }
 
 type TokenStatRow struct {
@@ -245,6 +249,7 @@ CREATE TABLE IF NOT EXISTS call_logs (
 	output_tokens INTEGER NOT NULL DEFAULT 0,
 	cache_creation_input_tokens INTEGER NOT NULL DEFAULT 0,
 	cache_read_input_tokens INTEGER NOT NULL DEFAULT 0,
+	token_estimated INTEGER NOT NULL DEFAULT 0,
 	created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
 	FOREIGN KEY (provider_id) REFERENCES providers(id) ON DELETE SET NULL
 );
@@ -285,6 +290,8 @@ func (s *Store) applyMigrations() error {
 		{3, s.ensureModelEnabledColumn},
 		{4, s.ensureAPIKeyStatsSchema},
 		{5, s.ensureAppSettingsSchema},
+		{6, s.enableVolcengineCodingStreamUsage},
+		{7, s.ensureTokenEstimateColumn},
 	}
 	for _, migration := range migrations {
 		var exists int
@@ -298,6 +305,61 @@ func (s *Store) applyMigrations() error {
 			return err
 		}
 		if _, err := s.db.Exec(`INSERT INTO schema_migrations(version, applied_at) VALUES (?, CURRENT_TIMESTAMP)`, migration.version); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Store) ensureTokenEstimateColumn() error {
+	has, err := s.hasColumn("call_logs", "token_estimated")
+	if err != nil {
+		return err
+	}
+	if has {
+		return nil
+	}
+	_, err = s.db.Exec(`ALTER TABLE call_logs ADD COLUMN token_estimated INTEGER NOT NULL DEFAULT 0`)
+	return err
+}
+
+// enableVolcengineCodingStreamUsage updates only the known Coding Plan
+// endpoint. Its streamed responses return usage as null unless the
+// OpenAI-compatible stream_options.include_usage flag is requested.
+func (s *Store) enableVolcengineCodingStreamUsage() error {
+	rows, err := s.db.Query(`SELECT id, capability_config FROM providers WHERE base_url LIKE '%ark.cn-beijing.volces.com/api/coding/v3%'`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	type item struct {
+		id  string
+		cfg capabilities.Provider
+	}
+	var items []item
+	for rows.Next() {
+		var id, raw string
+		if err := rows.Scan(&id, &raw); err != nil {
+			return err
+		}
+		cfg, err := capabilities.Parse(raw)
+		if err != nil {
+			return fmt.Errorf("parse Coding Plan capabilities for %q: %w", id, err)
+		}
+		if cfg.Protocol == capabilities.ProtocolOpenAIChat && !cfg.Streaming.IncludeUsage {
+			cfg.Streaming.IncludeUsage = true
+			items = append(items, item{id: id, cfg: cfg})
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, item := range items {
+		raw, err := json.MarshalIndent(item.cfg, "", "  ")
+		if err != nil {
+			return err
+		}
+		if _, err := s.db.Exec(`UPDATE providers SET capability_config = ?, updated_at = ? WHERE id = ?`, string(raw), timestamp(), item.id); err != nil {
 			return err
 		}
 	}
@@ -652,9 +714,9 @@ func (s *Store) CreateCallLogs(logs []CallLog) error {
 	}
 	var query strings.Builder
 	query.WriteString(`
-INSERT INTO call_logs(provider_id, model_id, app_name, protocol, started_at, ended_at, status_code, error, is_stream, input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens)
+INSERT INTO call_logs(provider_id, model_id, app_name, protocol, started_at, ended_at, status_code, error, is_stream, input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens, token_estimated)
 VALUES `)
-	args := make([]any, 0, len(logs)*13)
+	args := make([]any, 0, len(logs)*14)
 	for i, log := range logs {
 		if log.StartedAt == "" {
 			log.StartedAt = timestamp()
@@ -665,10 +727,10 @@ VALUES `)
 		if i > 0 {
 			query.WriteString(",")
 		}
-		query.WriteString("(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+		query.WriteString("(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
 		args = append(args,
 			nullable(log.ProviderID), nullable(log.ModelID), log.AppName, log.Protocol, log.StartedAt, nullable(log.EndedAt), log.StatusCode, nullable(log.Error), log.Stream,
-			log.InputTokens, log.OutputTokens, log.CacheCreationInputTokens, log.CacheReadInputTokens,
+			log.InputTokens, log.OutputTokens, log.CacheCreationInputTokens, log.CacheReadInputTokens, log.TokenEstimated,
 		)
 	}
 	_, err := s.db.Exec(query.String(), args...)
@@ -680,7 +742,7 @@ func (s *Store) TokenStats(filter TokenStatsFilter) (TokenStats, error) {
 	where, args := statsWhere(filter)
 	rows, err := s.db.Query(`
 SELECT substr(started_at, 1, 10), COUNT(*), COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0),
-       COALESCE(SUM(cache_creation_input_tokens), 0), COALESCE(SUM(cache_read_input_tokens), 0)
+       COALESCE(SUM(cache_creation_input_tokens), 0), COALESCE(SUM(cache_read_input_tokens), 0), COALESCE(SUM(token_estimated), 0)
 FROM call_logs`+where+`
 GROUP BY substr(started_at, 1, 10)
 ORDER BY substr(started_at, 1, 10)`, args...)
@@ -692,10 +754,11 @@ ORDER BY substr(started_at, 1, 10)`, args...)
 	var stats TokenStats
 	for rows.Next() {
 		var p TokenStatPoint
-		if err := rows.Scan(&p.Date, &p.Calls, &p.InputTokens, &p.OutputTokens, &p.CacheCreationInputTokens, &p.CacheReadInputTokens); err != nil {
+		if err := rows.Scan(&p.Date, &p.Calls, &p.InputTokens, &p.OutputTokens, &p.CacheCreationInputTokens, &p.CacheReadInputTokens, &p.EstimatedCalls); err != nil {
 			return TokenStats{}, err
 		}
 		stats.Calls += p.Calls
+		stats.EstimatedCalls += p.EstimatedCalls
 		stats.InputTokens += p.InputTokens
 		stats.OutputTokens += p.OutputTokens
 		stats.CacheCreationInputTokens += p.CacheCreationInputTokens
@@ -848,7 +911,7 @@ func (s *Store) CallLogs(filter TokenStatsFilter, page int, pageSize int) (CallL
 	rows, err := s.db.Query(`
 SELECT id, COALESCE(provider_id, ''), COALESCE(model_id, ''), app_name, protocol, started_at, COALESCE(ended_at, ''),
        COALESCE(status_code, 0), COALESCE(error, ''), is_stream, input_tokens, output_tokens,
-       cache_creation_input_tokens, cache_read_input_tokens
+       cache_creation_input_tokens, cache_read_input_tokens, token_estimated
 FROM call_logs`+where+`
 ORDER BY started_at DESC, id DESC
 LIMIT ? OFFSET ?`, append(args, pageSize, (page-1)*pageSize)...)
@@ -858,7 +921,7 @@ LIMIT ? OFFSET ?`, append(args, pageSize, (page-1)*pageSize)...)
 	defer rows.Close()
 	for rows.Next() {
 		var log CallLog
-		if err := rows.Scan(&log.ID, &log.ProviderID, &log.ModelID, &log.AppName, &log.Protocol, &log.StartedAt, &log.EndedAt, &log.StatusCode, &log.Error, &log.Stream, &log.InputTokens, &log.OutputTokens, &log.CacheCreationInputTokens, &log.CacheReadInputTokens); err != nil {
+		if err := rows.Scan(&log.ID, &log.ProviderID, &log.ModelID, &log.AppName, &log.Protocol, &log.StartedAt, &log.EndedAt, &log.StatusCode, &log.Error, &log.Stream, &log.InputTokens, &log.OutputTokens, &log.CacheCreationInputTokens, &log.CacheReadInputTokens, &log.TokenEstimated); err != nil {
 			return CallLogPage{}, err
 		}
 		log.DurationMs = durationMs(log.StartedAt, log.EndedAt)

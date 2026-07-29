@@ -34,6 +34,9 @@ func TestParseValidateAndDefaults(t *testing.T) {
 	if cfg, err := Parse(DefaultJSON("gemini")); err != nil || cfg.Protocol != ProtocolGemini {
 		t.Fatalf("gemini default = %#v/%v", cfg, err)
 	}
+	if cfg, err := Parse(DefaultJSON("volcengine-coding")); err != nil || !cfg.Streaming.IncludeUsage {
+		t.Fatalf("volcengine streaming default = %#v/%v", cfg, err)
+	}
 }
 
 func TestCapabilitySupportChecks(t *testing.T) {

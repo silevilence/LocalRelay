@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 
+	"localrelay/internal/capabilities"
+
 	_ "modernc.org/sqlite"
 )
 
@@ -993,6 +995,47 @@ func TestBuiltinProviderPresets(t *testing.T) {
 		if err := validateProvider(ProviderInput{ID: preset.ID, Name: preset.Name, Type: preset.Type, BaseURL: preset.BaseURL, CapabilityConfig: preset.CapabilityConfig}); err != nil {
 			t.Fatalf("preset %s invalid: %v", preset.ID, err)
 		}
+	}
+}
+
+func TestEnableVolcengineCodingStreamUsage(t *testing.T) {
+	s := openTestStore(t)
+	defer s.Close()
+	if _, err := s.CreateProvider(ProviderInput{
+		ID:               "volc",
+		Name:             "火山",
+		Type:             "openai-compatible",
+		BaseURL:          "https://ark.cn-beijing.volces.com/api/coding/v3",
+		CapabilityConfig: `{"protocol":"openai_chat"}`,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CreateProvider(ProviderInput{
+		ID:               "other",
+		Name:             "Other",
+		Type:             "openai-compatible",
+		BaseURL:          "https://example.test/v1",
+		CapabilityConfig: `{"protocol":"openai_chat"}`,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.enableVolcengineCodingStreamUsage(); err != nil {
+		t.Fatal(err)
+	}
+	providers, err := s.ListProviders()
+	if err != nil {
+		t.Fatal(err)
+	}
+	configs := make(map[string]capabilities.Provider, len(providers))
+	for _, provider := range providers {
+		cfg, err := capabilities.Parse(provider.CapabilityConfig)
+		if err != nil {
+			t.Fatal(err)
+		}
+		configs[provider.ID] = cfg
+	}
+	if !configs["volc"].Streaming.IncludeUsage || configs["other"].Streaming.IncludeUsage {
+		t.Fatalf("migrated streaming configs = %#v", configs)
 	}
 }
 

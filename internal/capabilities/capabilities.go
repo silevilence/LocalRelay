@@ -23,6 +23,8 @@ type Provider struct {
 	Thinking        Thinking        `json:"thinking,omitempty"`
 	ReasoningEffort ReasoningEffort `json:"reasoningEffort,omitempty"`
 	ToolCalls       ToolCalls       `json:"toolCalls,omitempty"`
+	// Streaming describes provider-specific options for streamed responses.
+	Streaming Streaming `json:"streaming,omitempty"`
 }
 
 type Thinking struct {
@@ -39,6 +41,12 @@ type Thinking struct {
 
 type ToolCalls struct {
 	RequireAssistantContent bool `json:"requireAssistantContent,omitempty"`
+}
+
+type Streaming struct {
+	// IncludeUsage asks OpenAI-compatible providers to emit a final SSE usage
+	// chunk through stream_options.include_usage.
+	IncludeUsage bool `json:"includeUsage,omitempty"`
 }
 
 type ReasoningEffort struct {
@@ -128,9 +136,13 @@ var defaults = map[string]Provider{
 		},
 	},
 	"openai-compatible": {Protocol: ProtocolOpenAIChat},
-	"anthropic":         {Protocol: ProtocolAnthropic},
-	"gemini":            {Protocol: ProtocolGemini},
-	"openai-responses":  {Protocol: ProtocolOpenAIResponse},
+	"volcengine-coding": {
+		Protocol:  ProtocolOpenAIChat,
+		Streaming: Streaming{IncludeUsage: true},
+	},
+	"anthropic":        {Protocol: ProtocolAnthropic},
+	"gemini":           {Protocol: ProtocolGemini},
+	"openai-responses": {Protocol: ProtocolOpenAIResponse},
 	"deepseek": {
 		Protocol: ProtocolOpenAIChat,
 		Thinking: Thinking{
