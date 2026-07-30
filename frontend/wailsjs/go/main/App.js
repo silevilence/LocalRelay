@@ -38,12 +38,20 @@ export function DeleteProvider(arg1) {
   return window['go']['main']['App']['DeleteProvider'](arg1);
 }
 
+export function DesktopSettings() {
+  return window['go']['main']['App']['DesktopSettings']();
+}
+
 export function FetchProviderModels(arg1) {
   return window['go']['main']['App']['FetchProviderModels'](arg1);
 }
 
 export function Greet(arg1) {
   return window['go']['main']['App']['Greet'](arg1);
+}
+
+export function HideToTray(arg1) {
+  return window['go']['main']['App']['HideToTray'](arg1);
 }
 
 export function InstallUpdate(arg1) {
@@ -66,6 +74,10 @@ export function ListProviders() {
   return window['go']['main']['App']['ListProviders']();
 }
 
+export function LocalAccessAddresses() {
+  return window['go']['main']['App']['LocalAccessAddresses']();
+}
+
 export function RelayBaseURL() {
   return window['go']['main']['App']['RelayBaseURL']();
 }
@@ -74,8 +86,40 @@ export function RelayPort() {
   return window['go']['main']['App']['RelayPort']();
 }
 
+export function RelayServiceEnabled() {
+  return window['go']['main']['App']['RelayServiceEnabled']();
+}
+
+export function RequestQuit() {
+  return window['go']['main']['App']['RequestQuit']();
+}
+
+export function SetHideOnClose(arg1) {
+  return window['go']['main']['App']['SetHideOnClose'](arg1);
+}
+
+export function SetHideOnMinimize(arg1) {
+  return window['go']['main']['App']['SetHideOnMinimize'](arg1);
+}
+
+export function SetLaunchAtLogin(arg1) {
+  return window['go']['main']['App']['SetLaunchAtLogin'](arg1);
+}
+
 export function SetRelayPort(arg1) {
   return window['go']['main']['App']['SetRelayPort'](arg1);
+}
+
+export function SetRelayServiceEnabled(arg1) {
+  return window['go']['main']['App']['SetRelayServiceEnabled'](arg1);
+}
+
+export function SetStartMinimized(arg1) {
+  return window['go']['main']['App']['SetStartMinimized'](arg1);
+}
+
+export function ShowMainWindow() {
+  return window['go']['main']['App']['ShowMainWindow']();
 }
 
 export function TestProviderModel(arg1, arg2) {

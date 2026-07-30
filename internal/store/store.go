@@ -14,6 +14,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -33,6 +34,27 @@ const NoAppName = "无应用"
 // DefaultRelayPort is the TCP port used by the local gateway when the user has
 // not selected another port.
 const DefaultRelayPort = 8718
+
+// DesktopSettings contains user-configurable application and gateway state.
+// Values are stored in app_settings so existing installations receive the
+// defaults without requiring a data migration for each newly added setting.
+type DesktopSettings struct {
+	GatewayEnabled bool `json:"gatewayEnabled"`
+	HideOnMinimize bool `json:"hideOnMinimize"`
+	HideOnClose    bool `json:"hideOnClose"`
+	LaunchAtLogin  bool `json:"launchAtLogin"`
+	StartMinimized bool `json:"startMinimized"`
+	TrayHintShown  bool `json:"-"`
+}
+
+func defaultDesktopSettings() DesktopSettings {
+	return DesktopSettings{
+		GatewayEnabled: true,
+		HideOnMinimize: true,
+		HideOnClose:    true,
+		StartMinimized: true,
+	}
+}
 
 type Store struct {
 	db  *sql.DB
@@ -396,6 +418,74 @@ func (s *Store) SetRelayPort(port int) error {
 INSERT INTO app_settings(key, value) VALUES ('relay_port', ?)
 ON CONFLICT(key) DO UPDATE SET value = excluded.value`, fmt.Sprintf("%d", port))
 	return err
+}
+
+// DesktopSettings returns persisted desktop settings, using sensible defaults
+// for databases created before a setting was introduced.
+func (s *Store) DesktopSettings() (DesktopSettings, error) {
+	settings := defaultDesktopSettings()
+	rows, err := s.db.Query(`SELECT key, value FROM app_settings WHERE key IN (
+        'gateway_enabled', 'hide_on_minimize', 'hide_on_close',
+        'launch_at_login', 'start_minimized', 'tray_hint_shown'
+    )`)
+	if err != nil {
+		return DesktopSettings{}, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var key, value string
+		if err := rows.Scan(&key, &value); err != nil {
+			return DesktopSettings{}, err
+		}
+		parsed, err := strconv.ParseBool(value)
+		if err != nil {
+			return DesktopSettings{}, fmt.Errorf("stored desktop setting %q is invalid: %w", key, err)
+		}
+		switch key {
+		case "gateway_enabled":
+			settings.GatewayEnabled = parsed
+		case "hide_on_minimize":
+			settings.HideOnMinimize = parsed
+		case "hide_on_close":
+			settings.HideOnClose = parsed
+		case "launch_at_login":
+			settings.LaunchAtLogin = parsed
+		case "start_minimized":
+			settings.StartMinimized = parsed
+		case "tray_hint_shown":
+			settings.TrayHintShown = parsed
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return DesktopSettings{}, err
+	}
+	return settings, nil
+}
+
+// SetDesktopSettings persists the complete desktop-settings snapshot. Keeping
+// the values together avoids a partial state when a UI updates several toggles.
+func (s *Store) SetDesktopSettings(settings DesktopSettings) error {
+	values := map[string]bool{
+		"gateway_enabled":  settings.GatewayEnabled,
+		"hide_on_minimize": settings.HideOnMinimize,
+		"hide_on_close":    settings.HideOnClose,
+		"launch_at_login":  settings.LaunchAtLogin,
+		"start_minimized":  settings.StartMinimized,
+		"tray_hint_shown":  settings.TrayHintShown,
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for key, value := range values {
+		if _, err := tx.Exec(`
+INSERT INTO app_settings(key, value) VALUES (?, ?)
+ON CONFLICT(key) DO UPDATE SET value = excluded.value`, key, strconv.FormatBool(value)); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 // ValidateRelayPort rejects ports that cannot be used as a TCP listen port.

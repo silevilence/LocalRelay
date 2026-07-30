@@ -16,6 +16,20 @@ export namespace main {
 	        this.installScope = source["installScope"];
 	    }
 	}
+	export class LocalAddress {
+	    url: string;
+	    source: string;
+
+	    static createFrom(source: any = {}) {
+	        return new LocalAddress(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.url = source["url"];
+	        this.source = source["source"];
+	    }
+	}
 	export class ProviderModel {
 	    id: string;
 	    name: string;
@@ -198,6 +212,26 @@ export namespace store {
 		    }
 		    return a;
 		}
+	}
+	export class DesktopSettings {
+	    gatewayEnabled: boolean;
+	    hideOnMinimize: boolean;
+	    hideOnClose: boolean;
+	    launchAtLogin: boolean;
+	    startMinimized: boolean;
+
+	    static createFrom(source: any = {}) {
+	        return new DesktopSettings(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.gatewayEnabled = source["gatewayEnabled"];
+	        this.hideOnMinimize = source["hideOnMinimize"];
+	        this.hideOnClose = source["hideOnClose"];
+	        this.launchAtLogin = source["launchAtLogin"];
+	        this.startMinimized = source["startMinimized"];
+	    }
 	}
 	export class Model {
 	    id: string;

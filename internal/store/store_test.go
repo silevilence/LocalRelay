@@ -108,6 +108,38 @@ func TestRelayPortDefaultsPersistsAndValidates(t *testing.T) {
 	}
 }
 
+func TestDesktopSettingsDefaultsAndPersist(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "localrelay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	settings, err := s.DesktopSettings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !settings.GatewayEnabled || !settings.HideOnMinimize || !settings.HideOnClose || settings.LaunchAtLogin || !settings.StartMinimized {
+		t.Fatalf("default desktop settings = %#v", settings)
+	}
+	settings.GatewayEnabled = false
+	settings.HideOnMinimize = false
+	settings.HideOnClose = false
+	settings.LaunchAtLogin = true
+	settings.StartMinimized = false
+	settings.TrayHintShown = true
+	if err := s.SetDesktopSettings(settings); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.DesktopSettings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != settings {
+		t.Fatalf("desktop settings = %#v, want %#v", got, settings)
+	}
+}
+
 func TestProviderCapabilityConfigIsStoredAndValidated(t *testing.T) {
 	s := openTestStore(t)
 	defer s.Close()

@@ -21,9 +21,13 @@ export function DeleteModel(arg1:string,arg2:string):Promise<void>;
 
 export function DeleteProvider(arg1:string):Promise<void>;
 
+export function DesktopSettings():Promise<store.DesktopSettings>;
+
 export function FetchProviderModels(arg1:string):Promise<Array<main.ProviderModel>>;
 
 export function Greet(arg1:string):Promise<string>;
+
+export function HideToTray(arg1:boolean):Promise<void>;
 
 export function InstallUpdate(arg1:string):Promise<void>;
 
@@ -35,11 +39,29 @@ export function ListProviderPresets():Promise<Array<store.ProviderPreset>>;
 
 export function ListProviders():Promise<Array<store.Provider>>;
 
+export function LocalAccessAddresses():Promise<Array<main.LocalAddress>>;
+
 export function RelayBaseURL():Promise<string>;
 
 export function RelayPort():Promise<number>;
 
+export function RelayServiceEnabled():Promise<boolean>;
+
+export function RequestQuit():Promise<void>;
+
+export function SetHideOnClose(arg1:boolean):Promise<store.DesktopSettings>;
+
+export function SetHideOnMinimize(arg1:boolean):Promise<store.DesktopSettings>;
+
+export function SetLaunchAtLogin(arg1:boolean):Promise<store.DesktopSettings>;
+
 export function SetRelayPort(arg1:number):Promise<number>;
+
+export function SetRelayServiceEnabled(arg1:boolean):Promise<boolean>;
+
+export function SetStartMinimized(arg1:boolean):Promise<store.DesktopSettings>;
+
+export function ShowMainWindow():Promise<void>;
 
 export function TestProviderModel(arg1:string,arg2:string):Promise<main.ProviderTestResult>;
 

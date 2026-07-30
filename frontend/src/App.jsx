@@ -12,12 +12,19 @@ import {
     DeleteProvider,
 	FetchProviderModels,
     ListAPIKeys,
+	DesktopSettings,
+	LocalAccessAddresses,
     ListModels,
     ListProviderPresets,
     ListProviders,
     RelayBaseURL,
     RelayPort,
+	SetHideOnClose,
+	SetHideOnMinimize,
+	SetLaunchAtLogin,
     SetRelayPort,
+	SetRelayServiceEnabled,
+	SetStartMinimized,
     TokenStatApps,
     TokenStatModels,
     TokenStatRows,
@@ -90,6 +97,9 @@ function App() {
     const [relayBaseUrl, setRelayBaseUrl] = useState("");
     const [relayPort, setRelayPort] = useState("");
     const [savingRelayPort, setSavingRelayPort] = useState(false);
+	const [desktopSettings, setDesktopSettings] = useState({gatewayEnabled: true, hideOnMinimize: true, hideOnClose: true, launchAtLogin: false, startMinimized: true});
+	const [localAddresses, setLocalAddresses] = useState([]);
+	const [savingDesktopSetting, setSavingDesktopSetting] = useState("");
     const [statsFilter, setStatsFilter] = useState({from: daysAgo(7), to: today(), providerId: "", modelId: "", appName: ""});
     const [statsModelOptions, setStatsModelOptions] = useState([]);
     const [statsAppOptions, setStatsAppOptions] = useState([]);
@@ -151,6 +161,8 @@ function App() {
         ListProviderPresets().then((items) => setProviderPresets(items || [])).catch(() => {});
         RelayBaseURL().then(setRelayBaseUrl).catch(() => {});
         RelayPort().then((port) => setRelayPort(String(port))).catch(() => {});
+		DesktopSettings().then(setDesktopSettings).catch(() => {});
+		refreshLocalAddresses();
         AppInfo().then(setAppInfo).catch(() => {});
         checkUpdates(false);
     }, []);
@@ -158,6 +170,20 @@ function App() {
     useEffect(() => {
         return EventsOn("update-progress", (progress) => setUpdateProgress(progress || null));
     }, []);
+
+	useEffect(() => EventsOn("gateway-service-changed", (enabled) => {
+		setDesktopSettings((current) => ({...current, gatewayEnabled: Boolean(enabled)}));
+	}), []);
+
+	useEffect(() => EventsOn("gateway-service-error", (detail) => {
+		const text = `网关服务操作提示：${detail}`;
+		setMessage(text);
+		notify(text);
+	}), []);
+
+	useEffect(() => {
+		if (page === "settings") refreshLocalAddresses();
+	}, [page]);
 
     useEffect(() => {
         refreshStats();
@@ -535,7 +561,8 @@ function App() {
             const port = await SetRelayPort(Number(relayPort));
             setRelayPort(String(port));
             setRelayBaseUrl(await RelayBaseURL());
-            const success = `网关已重启并监听 ${port} 端口。`;
+			await refreshLocalAddresses();
+            const success = desktopSettings.gatewayEnabled ? `网关已重启并监听 ${port} 端口。` : `端口已保存为 ${port}，将在网关恢复时生效。`;
             setMessage(success);
             notify(success);
         } catch (error) {
@@ -544,6 +571,45 @@ function App() {
             setSavingRelayPort(false);
         }
     }
+
+	async function refreshLocalAddresses() {
+		try {
+			setLocalAddresses((await LocalAccessAddresses()) || []);
+		} catch (error) {
+			setMessage(`刷新本机访问地址失败：${error}`);
+		}
+	}
+
+	async function saveDesktopSetting(name, setter, enabled) {
+		setSavingDesktopSetting(name);
+		try {
+			const settings = await setter(enabled);
+			setDesktopSettings(settings);
+			const success = "设置已保存。";
+			setMessage(success);
+			notify(success);
+		} catch (error) {
+			setMessage(`保存设置失败：${error}`);
+		} finally {
+			setSavingDesktopSetting("");
+		}
+	}
+
+	async function setGatewayEnabled(enabled) {
+		setSavingDesktopSetting("gateway");
+		try {
+			const result = await SetRelayServiceEnabled(enabled);
+			setDesktopSettings((current) => ({...current, gatewayEnabled: result}));
+			const success = result ? "网关服务已恢复。" : "网关服务已暂停。";
+			setMessage(success);
+			notify(success);
+		} catch (error) {
+			DesktopSettings().then(setDesktopSettings).catch(() => {});
+			setMessage(`切换网关服务失败：${error}`);
+		} finally {
+			setSavingDesktopSetting("");
+		}
+	}
 
     function skipUpdate() {
         if (updateInfo?.latestVersion) {
@@ -601,11 +667,20 @@ function App() {
                 <main className="min-h-0 flex-1 overflow-y-auto px-7 py-5">
                     <div className="mx-auto max-w-4xl">
                         <RelaySettingsPanel
-                            baseUrl={relayBaseUrl}
                             port={relayPort}
                             saving={savingRelayPort}
+                            settings={desktopSettings}
+                            addresses={localAddresses}
+                            settingSaving={savingDesktopSetting}
                             onPortChange={setRelayPort}
                             onSubmit={saveRelayPort}
+                            onGatewayChange={setGatewayEnabled}
+                            onHideOnMinimizeChange={(value) => saveDesktopSetting("hideOnMinimize", SetHideOnMinimize, value)}
+                            onHideOnCloseChange={(value) => saveDesktopSetting("hideOnClose", SetHideOnClose, value)}
+                            onLaunchAtLoginChange={(value) => saveDesktopSetting("launchAtLogin", SetLaunchAtLogin, value)}
+                            onStartMinimizedChange={(value) => saveDesktopSetting("startMinimized", SetStartMinimized, value)}
+                            onRefreshAddresses={refreshLocalAddresses}
+                            onCopy={copyText}
                         />
                         <UpdatePanel
                             appInfo={appInfo}
@@ -1213,7 +1288,7 @@ function APIKeyForm({draft, editing, onChange, onSubmit, onCancel}) {
 	);
 }
 
-function RelaySettingsPanel({baseUrl, port, saving, onPortChange, onSubmit}) {
+function RelaySettingsPanel({port, saving, settings, addresses, settingSaving, onPortChange, onSubmit, onGatewayChange, onHideOnMinimizeChange, onHideOnCloseChange, onLaunchAtLoginChange, onStartMinimizedChange, onRefreshAddresses, onCopy}) {
     return (
         <section className="mt-7 rounded-2xl border border-zinc-800 bg-zinc-950/30 p-5">
             <div className="flex flex-wrap items-start justify-between gap-3">
@@ -1221,8 +1296,9 @@ function RelaySettingsPanel({baseUrl, port, saving, onPortChange, onSubmit}) {
                     <h2 className="text-xl font-bold">网关服务</h2>
                     <p className="mt-1 text-sm text-zinc-500">服务监听所有本机网卡，局域网设备可通过这台电脑的局域网 IP 访问。</p>
                 </div>
-                <span className="rounded-full border border-emerald-800 bg-emerald-950/30 px-3 py-1 text-xs font-semibold text-emerald-300">局域网已启用</span>
+                <span className={`rounded-full border px-3 py-1 text-xs font-semibold ${settings.gatewayEnabled ? "border-emerald-800 bg-emerald-950/30 text-emerald-300" : "border-zinc-700 bg-zinc-900 text-zinc-400"}`}>{settings.gatewayEnabled ? "服务运行中" : "服务已暂停"}</span>
             </div>
+            <SettingSwitch label="启用网关服务" description="关闭后会等待在途请求（最多 3 秒）并释放监听端口；配置仍会保留。" checked={settings.gatewayEnabled} disabled={settingSaving === "gateway"} onChange={onGatewayChange} />
             <form className="mt-5 flex flex-wrap items-end gap-3" onSubmit={onSubmit}>
                 <div className="w-full max-w-xs">
                     <Field label="监听端口" type="number" value={port} onChange={onPortChange} placeholder="8718" />
@@ -1232,17 +1308,51 @@ function RelaySettingsPanel({baseUrl, port, saving, onPortChange, onSubmit}) {
                     type="submit"
                     disabled={saving}
                 >
-                    {saving ? "正在重启网关…" : "保存并重启网关"}
+                    {saving ? "正在保存…" : settings.gatewayEnabled ? "保存并重启网关" : "保存端口"}
                 </button>
             </form>
-            <div className="mt-4 rounded-xl border border-zinc-800 bg-black/20 p-3 text-sm text-zinc-400">
-                <div>本机地址：<span className="font-mono text-zinc-200">{baseUrl || "启动中…"}</span></div>
-                <div className="mt-1 text-xs text-zinc-500">局域网客户端请将其中的 127.0.0.1 替换为本机局域网 IP，并确保 Windows 防火墙允许该端口的入站连接。</div>
+            <div className="mt-5 rounded-xl border border-zinc-800 bg-black/20 p-4">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                        <h3 className="font-bold text-zinc-200">本机访问地址</h3>
+                        <p className="mt-1 text-xs text-zinc-500">端口取当前设置；虚拟网卡也会列出。请确保 Windows 防火墙允许对应入站连接。</p>
+                    </div>
+                    <button className="rounded-lg border border-zinc-700 px-3 py-1.5 text-sm text-zinc-300 hover:bg-zinc-900" type="button" onClick={onRefreshAddresses}>刷新</button>
+                </div>
+                <div className="mt-3 divide-y divide-zinc-800 overflow-hidden rounded-lg border border-zinc-800">
+                    {addresses.map((address) => (
+                        <div key={`${address.url}-${address.source}`} className="flex flex-wrap items-center gap-2 bg-zinc-950/40 px-3 py-2.5 text-sm">
+                            <code className="min-w-0 flex-1 break-all font-mono text-zinc-200">{address.url}</code>
+                            <span className="text-xs text-zinc-500">({address.source})</span>
+                            <button className="rounded-lg border border-zinc-700 px-2.5 py-1 text-xs text-zinc-300 hover:bg-zinc-900" type="button" onClick={() => onCopy(address.url)}>⧉ 复制</button>
+                        </div>
+                    ))}
+                    {!addresses.length && <div className="px-3 py-3 text-sm text-zinc-500">正在读取本机网络地址…</div>}
+                </div>
+            </div>
+            <div className="mt-5 border-t border-zinc-800 pt-5">
+                <h3 className="font-bold text-zinc-200">桌面行为（Windows）</h3>
+                <SettingSwitch label="最小化时隐藏到系统托盘" description="开启后点击窗口最小化按钮会隐藏窗口，托盘图标会持续显示。" checked={settings.hideOnMinimize} disabled={settingSaving === "hideOnMinimize"} onChange={onHideOnMinimizeChange} />
+                <SettingSwitch label="关闭时隐藏到系统托盘" description="首次隐藏会提示：已隐藏到系统托盘，可从托盘图标右键退出。" checked={settings.hideOnClose} disabled={settingSaving === "hideOnClose"} onChange={onHideOnCloseChange} />
+                <SettingSwitch label="开机启动" description="在当前用户的 Windows 登录后启动 LocalRelay，无需管理员权限。" checked={settings.launchAtLogin} disabled={settingSaving === "launchAtLogin"} onChange={onLaunchAtLoginChange} />
+                <SettingSwitch label="启动时自动缩小到托盘" description="开启后每次启动都会直接隐藏主窗口到托盘；可独立于开机启动开关设置。" checked={settings.startMinimized} disabled={settingSaving === "startMinimized"} onChange={onStartMinimizedChange} />
             </div>
             <div className="mt-3 rounded-xl border border-amber-900/70 bg-amber-950/20 p-3 text-sm text-amber-200">
                 注意：当前 API Key 仅用于调用统计，不会拦截无效请求。请只在可信局域网使用，并通过防火墙限制可访问此端口的设备。
             </div>
         </section>
+    );
+}
+
+function SettingSwitch({label, description, checked, disabled, onChange}) {
+    return (
+        <label className="mt-4 flex cursor-pointer items-start justify-between gap-4 rounded-xl border border-zinc-800 bg-black/20 p-3.5">
+            <span>
+                <span className="block text-sm font-semibold text-zinc-200">{label}</span>
+                <span className="mt-1 block text-xs leading-5 text-zinc-500">{description}</span>
+            </span>
+            <input className="mt-1 h-4 w-4 accent-emerald-500 disabled:cursor-wait" type="checkbox" checked={checked} disabled={disabled} onChange={(event) => onChange(event.target.checked)} />
+        </label>
     );
 }
 

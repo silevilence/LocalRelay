@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -12,9 +13,11 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"localrelay/internal/capabilities"
@@ -25,15 +28,28 @@ import (
 	"localrelay/internal/protocol/openairesponses"
 	"localrelay/internal/relay"
 	"localrelay/internal/store"
+
+	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
 // App struct
 type App struct {
-	ctx         context.Context
-	store       *store.Store
-	relay       *relay.Server
-	relayServer *http.Server
-	relayMu     sync.Mutex
+	ctx             context.Context
+	store           *store.Store
+	relay           *relay.Server
+	relayServer     *http.Server
+	relayMu         sync.Mutex
+	trayMu          sync.Mutex
+	trayStop        func()
+	trayOnce        sync.Once
+	trayGatewayItem trayMenuItem
+	watchCancel     context.CancelFunc
+	startMinimized  bool
+	quitting        atomic.Bool
+}
+
+type trayMenuItem interface {
+	SetTitle(string)
 }
 
 // NewApp creates a new App application struct
@@ -51,12 +67,33 @@ func (a *App) startup(ctx context.Context) {
 	}
 	a.store = db
 	a.relay = relay.New(db)
-	port, err := a.store.RelayPort()
+	settings, err := a.store.DesktopSettings()
 	if err != nil {
 		panic(err)
 	}
-	if err := a.startRelay(port); err != nil {
-		panic(fmt.Errorf("start relay gateway: %w", err))
+	if settings.GatewayEnabled {
+		port, err := a.store.RelayPort()
+		if err != nil {
+			panic(err)
+		}
+		if err := a.startRelay(port); err != nil {
+			panic(fmt.Errorf("start relay gateway: %w", err))
+		}
+	}
+	a.startSystemTray()
+	a.startWindowStateWatcher()
+	a.startMinimized = shouldStartMinimized(settings)
+	if a.startMinimized {
+		runtime.WindowHide(a.ctx)
+	}
+}
+
+// domReady repeats the startup hide after the WebView has attached. This is
+// needed in wails dev, where StartHidden cannot inspect the SQLite setting
+// before the lifecycle callback opens the store.
+func (a *App) domReady(ctx context.Context) {
+	if a.startMinimized {
+		runtime.WindowHide(ctx)
 	}
 }
 
@@ -83,12 +120,14 @@ func (a *App) serveRelay(listener net.Listener) {
 	}()
 }
 
-func (a *App) shutdown(ctx context.Context) {
-	if a.relayServer != nil {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		defer cancel()
-		_ = a.relayServer.Shutdown(shutdownCtx)
+func (a *App) shutdown(_ context.Context) {
+	if a.watchCancel != nil {
+		a.watchCancel()
 	}
+	a.relayMu.Lock()
+	a.stopRelayLocked()
+	a.relayMu.Unlock()
+	a.stopSystemTray()
 	if a.relay != nil {
 		a.relay.Close()
 	}
@@ -315,6 +354,75 @@ func (a *App) RelayBaseURL() string {
 	return fmt.Sprintf("http://127.0.0.1:%d", port)
 }
 
+// LocalAddress is an address clients can use to connect to this machine's
+// gateway. Source names the loopback, network interface, or hostname origin.
+type LocalAddress struct {
+	URL    string `json:"url"`
+	Source string `json:"source"`
+}
+
+// LocalAccessAddresses lists loopback, all non-loopback IPv4 interfaces, and
+// the local hostname. Virtual interfaces are intentionally retained because
+// they can be valid paths for Docker, VPN, and VM clients.
+func (a *App) LocalAccessAddresses() ([]LocalAddress, error) {
+	port, err := a.store.RelayPort()
+	if err != nil {
+		return nil, err
+	}
+	addresses := []LocalAddress{{
+		URL:    fmt.Sprintf("http://127.0.0.1:%d", port),
+		Source: "本地回环",
+	}}
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		return nil, err
+	}
+	var networkAddresses []LocalAddress
+	for _, iface := range interfaces {
+		if iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		interfaceAddresses, err := iface.Addrs()
+		if err != nil {
+			// A transient or virtual-adapter lookup failure must not hide the
+			// loopback address and all other usable adapters from Settings.
+			log.Printf("read addresses for interface %s: %v", iface.Name, err)
+			continue
+		}
+		for _, address := range interfaceAddresses {
+			var ip net.IP
+			switch value := address.(type) {
+			case *net.IPNet:
+				ip = value.IP
+			case *net.IPAddr:
+				ip = value.IP
+			}
+			ipv4 := ip.To4()
+			if ipv4 == nil || ipv4.IsUnspecified() || ipv4.IsLoopback() {
+				continue
+			}
+			networkAddresses = append(networkAddresses, LocalAddress{
+				URL:    fmt.Sprintf("http://%s:%d", ipv4.String(), port),
+				Source: iface.Name,
+			})
+		}
+	}
+	sort.Slice(networkAddresses, func(i, j int) bool {
+		if networkAddresses[i].URL == networkAddresses[j].URL {
+			return networkAddresses[i].Source < networkAddresses[j].Source
+		}
+		return networkAddresses[i].URL < networkAddresses[j].URL
+	})
+	addresses = append(addresses, networkAddresses...)
+	if hostname, err := os.Hostname(); err == nil && strings.TrimSpace(hostname) != "" {
+		addresses = append(addresses, LocalAddress{
+			URL:    fmt.Sprintf("http://%s:%d", hostname, port),
+			Source: "主机名",
+		})
+	}
+	return addresses, nil
+}
+
 // RelayPort returns the active gateway port selected in Settings.
 func (a *App) RelayPort() (int, error) {
 	return a.store.RelayPort()
@@ -338,6 +446,16 @@ func (a *App) SetRelayPort(port int) (int, error) {
 	if current == port {
 		return port, nil
 	}
+	settings, err := a.store.DesktopSettings()
+	if err != nil {
+		return 0, err
+	}
+	if !settings.GatewayEnabled {
+		if err := a.store.SetRelayPort(port); err != nil {
+			return 0, err
+		}
+		return port, nil
+	}
 	listener, err := listenRelay(port)
 	if err != nil {
 		return 0, fmt.Errorf("port %d is unavailable: %w", port, err)
@@ -348,17 +466,107 @@ func (a *App) SetRelayPort(port int) (int, error) {
 	}
 
 	if a.relayServer != nil {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		err = a.relayServer.Shutdown(shutdownCtx)
-		cancel()
-		if err != nil {
+		shutdownWarning := a.stopRelayLocked()
+		if shutdownWarning != nil && a.relayServer != nil {
 			_ = a.store.SetRelayPort(current)
 			_ = listener.Close()
-			return 0, fmt.Errorf("stop existing relay gateway: %w", err)
+			return 0, fmt.Errorf("stop existing relay gateway: %w", shutdownWarning)
+		}
+		if shutdownWarning != nil {
+			a.emitGatewayError(shutdownWarning)
 		}
 	}
 	a.serveRelay(listener)
 	return port, nil
+}
+
+// RelayServiceEnabled returns whether the gateway is meant to be running.
+func (a *App) RelayServiceEnabled() (bool, error) {
+	settings, err := a.store.DesktopSettings()
+	return settings.GatewayEnabled, err
+}
+
+// SetRelayServiceEnabled starts or stops the HTTP gateway while retaining the
+// relay instance and its stores, so a later enable needs no reinitialisation.
+func (a *App) SetRelayServiceEnabled(enabled bool) (bool, error) {
+	a.relayMu.Lock()
+	defer a.relayMu.Unlock()
+	var shutdownWarning error
+	settings, err := a.store.DesktopSettings()
+	if err != nil {
+		return false, err
+	}
+	if settings.GatewayEnabled == enabled {
+		return enabled, nil
+	}
+	if enabled {
+		port, err := a.store.RelayPort()
+		if err != nil {
+			return false, err
+		}
+		listener, err := listenRelay(port)
+		if err != nil {
+			return false, fmt.Errorf("port %d is unavailable: %w", port, err)
+		}
+		settings.GatewayEnabled = true
+		if err := a.store.SetDesktopSettings(settings); err != nil {
+			_ = listener.Close()
+			return false, err
+		}
+		a.serveRelay(listener)
+	} else {
+		shutdownWarning = a.stopRelayLocked()
+		if shutdownWarning != nil && a.relayServer != nil {
+			return true, fmt.Errorf("stop relay gateway: %w", shutdownWarning)
+		}
+		settings.GatewayEnabled = false
+		if err := a.store.SetDesktopSettings(settings); err != nil {
+			return true, err
+		}
+	}
+	a.updateTrayGatewayMenu(enabled)
+	a.emitGatewayState(enabled)
+	if shutdownWarning != nil {
+		return enabled, shutdownWarning
+	}
+	return enabled, nil
+}
+
+func (a *App) stopRelayLocked() error {
+	if a.relayServer == nil {
+		return nil
+	}
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	err := a.relayServer.Shutdown(shutdownCtx)
+	cancel()
+	if err == nil {
+		a.relayServer = nil
+		return nil
+	}
+	// Shutdown has already stopped accepting new connections. If its grace
+	// period expires, force-close the remaining requests so the persisted
+	// disabled state always agrees with the actual listener state.
+	if closeErr := a.relayServer.Close(); closeErr != nil && !errors.Is(closeErr, http.ErrServerClosed) {
+		return fmt.Errorf("graceful shutdown failed: %w; force close failed: %v", err, closeErr)
+	}
+	a.relayServer = nil
+	return fmt.Errorf("graceful shutdown exceeded 3 seconds; remaining requests were force-closed: %w", err)
+}
+
+func (a *App) emitGatewayState(enabled bool) {
+	if a.ctx != nil {
+		runtime.EventsEmit(a.ctx, "gateway-service-changed", enabled)
+	}
+}
+
+func (a *App) emitGatewayError(err error) {
+	if err == nil {
+		return
+	}
+	log.Printf("gateway service operation: %v", err)
+	if a.ctx != nil {
+		runtime.EventsEmit(a.ctx, "gateway-service-error", err.Error())
+	}
 }
 
 func providerChatURL(base string) string {
