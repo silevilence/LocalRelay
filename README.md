@@ -16,6 +16,11 @@
 - **统计图表**：基于 ECharts 提供饼图、柱形图、折线图，支持按小时、按天、按周统计。
 - **网关访问密钥**：生成与管理访问网关的密钥（仅用于统计口径，不拦截请求），支持命名、备注、复制与显示切换，删除为软删除。
 - **网关端口可自定义**：在「设置」页面修改监听端口，保存后自动重启；支持局域网访问。
+- **网关服务开关**：可在「设置」页面或系统托盘随时暂停/恢复网关服务而无需关闭应用；暂停时优雅等待在途请求结束，端口设置仍可编辑并在下次开启时生效。
+- **系统托盘**：应用运行时常驻系统托盘图标，双击或右键即可显示主窗口；右键菜单支持暂停/恢复网关服务与退出应用，并与设置页开关双向同步。
+- **最小化与关闭隐藏到托盘**：可选最小化/关闭窗口时隐藏到托盘而非退出（默认开启），支持启动时自动隐藏到托盘，首次隐藏时弹出气泡提示。
+- **开机启动**：可选开机自启（通过系统注册表实现，无需管理员权限）。
+- **本机访问地址**：设置页列出本机回环、各网卡 IPv4 与主机名形式的访问地址，方便局域网设备接入，每条地址支持一键复制。
 - **应用内自动更新**：检查 GitHub Release 最新稳定版，下载并校验 NSIS 安装包后静默覆盖安装并重启。
 
 ## 环境要求
@@ -23,7 +28,7 @@
 - **Go** 1.25.0+（见 `go.mod`）
 - **Node.js** 22+（前端构建）
 - **Wails CLI** v2.13.0
-- **Windows**：当前发布 Windows x64 安装包；开发也可在 macOS/Linux 上运行 `wails dev`
+- **Windows**：当前发布 Windows x64 安装包；系统托盘、开机启动等桌面集成功能仅在 Windows 上完整可用，macOS/Linux 上为不崩溃的兼容占位（开发也可在 macOS/Linux 上运行 `wails dev`）
 
 ## 快速开始
 
@@ -66,7 +71,10 @@ go test ./...
 
 ```
 main.go              Wails 应用入口
-app.go               前端绑定（供应商/模型/密钥/统计/更新等）
+app.go               前端绑定（供应商/模型/密钥/统计/网关/更新等）
+app_desktop.go       桌面设置前端绑定（托盘行为、开机启动等）
+desktop_windows.go   Windows 平台系统托盘、开机启动、窗口状态监听
+desktop_other.go     非 Windows 平台的桌面集成占位（不崩溃兼容）
 updater.go           应用内自动更新
 internal/
   ir/                内部统一协议格式（非流式 Request/Response + 流式 StreamEvent）
@@ -77,7 +85,7 @@ internal/
     gemini/          Google Gemini 出站转换
     openairesponses/ OpenAI Responses 出站转换
   relay/             HTTP 网关服务、流式转发、Token 估算
-  store/             SQLite 存储层、迁移、预设、统计查询
+  store/             SQLite 存储层、迁移、预设、统计查询、桌面设置
 frontend/            React + TailwindCSS 前端
 build/               Wails 打包配置（Windows NSIS、macOS plist）
 docs/                设计文档（ir.md）

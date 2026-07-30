@@ -18,7 +18,12 @@
 - 内部格式设计以 **Anthropic Messages 结构为蓝本**做适度扩展（block 化的 content 表达能力最强，其他协议可视为其降级映射）。
 - 流式（SSE）与非流式的内部格式**分别设计**，不假设可以互相简单派生。
 - 不同提供商在同一协议类型下的细节差异（思考开关字段、reasoning_effort 取值、思考内容是否回传、cache token 字段命名、流式是否需要 `stream_options.include_usage` 等）通过**可配置的"能力描述 + 适配器"层**解决，不硬编码 if-else，新增/调整某个提供商的怪异字段应尽量只改配置，不改核心转换逻辑。能力配置结构见 `internal/capabilities`（`Provider` 含 `Protocol` / `Thinking` / `ReasoningEffort` / `ToolCalls` / `Streaming`）。
-- 优先实现「OpenAI Chat → 内部格式」与「内部格式 → 各上游协议」，再逐步扩展「OpenAI Response / Anthropic / Google → 内部格式」。
+- 优先实现「OpenAI Chat → 内部格式」与「内部格式 → 各上游协议」，再逐步扩展「OpenAI Response / Anthropic / Google → 内部格式」。### 桌面集成与平台分层
+
+- 桌面集成（系统托盘、开机启动、窗口最小化/关闭隐藏、启动隐藏、网关服务启停）通过 **Go build tag** 分平台实现：`desktop_windows.go`（`//go:build windows`）承载 Windows 完整实现，`desktop_other.go`（`//go:build !windows`）提供同名方法的空实现/不支持错误，确保非 Windows 构建不崩溃。新增平台集成能力必须同时补齐 `desktop_other.go` 的占位，禁止让非目标平台编译失败。
+- 桌面相关开关（`GatewayEnabled` / `HideOnMinimize` / `HideOnClose` / `LaunchAtLogin` / `StartMinimized`）持久化在 `app_settings` 表，统一通过 `internal/store.DesktopSettings` 读写；新增桌面开关应扩展该结构体并补默认值，不要新建独立的存储表。前端绑定集中在 `app_desktop.go`。
+- 网关服务启停（`SetRelayServiceEnabled`）只关闭 `http.Server` 监听，**不销毁** `relay.Server` 实例与其已加载的存储，便于再次开启时无需重新初始化；关闭走 `Shutdown`（3 秒超时）后再 `Close` 兜底，保证持久化的禁用态与实际监听态一致。
+- 系统托盘菜单项（如「暂停/恢复网关服务」）必须与设置页开关**双向同步**：托盘操作翻转状态后通过 `runtime.EventsEmit` 通知前端，前端翻转后调用 `updateTrayGatewayMenu` 同步托盘菜单文字。
 
 ## 技术栈约束
 
@@ -28,6 +33,7 @@
 - 前端 UI：React + TailwindCSS，组件库参考 shadcn 风格。
 - 数据存储：SQLite，优先使用纯 Go 驱动（如 `modernc.org/sqlite`），避免 CGO 依赖以简化 Windows 打包。
 - 图表：ECharts 或同等前端图表库，用于 Token 统计可视化。
+- 系统托盘：使用纯 Go 的 `github.com/energye/systray`（无 CGO），Windows 通知使用 `git.sr.ht/~jackmordaunt/go-toast/v2`；跨平台扩展时优先沿用纯 Go 方案，避免引入 CGO。
 - CI/CD：GitHub Actions，产物发布到 GitHub Releases，用于配合自动更新机制。
 
 ## 开发原则与约束
@@ -75,7 +81,7 @@
 
 - **emoji**：视觉分类标识，必须使用
 - **type**：`feat` / `fix` / `refactor` / `docs` / `test` / `chore` / `style` / `perf`
-- **scope**：可选，如 `(opds)`、`(spider)`、`(api)`、`(web)`
+- **scope**：可选，如 `(relay)`、`(protocol)`、`(app)`、`(desktop)`、`(store)`、`(updater)`、`(ci)`
 - **subject**：中文标题，概括变更内容，首字无需空格
 - **body**：英文或中英文混排，每行为一个 `- ` 开头的条目，描述具体变更
 - **footer**：可选的 `Refs:` 或 `BREAKING CHANGE:`
@@ -97,21 +103,21 @@
 ### 示例
 
 ```
-✨ feat(opds): 实现 OPDS 基础层——可见性控制与 EPUB 制品生命周期
+✨ feat(desktop): 实现系统托盘、开机启动与网关服务开关
 
-- DB: add opds_visible, content_updated_at, epub_compiled_at columns
-- Repository: add OPDS CRUD methods
-- OpdsCompilationService: new cron-based scheduler
+- tray: 新增 systray 托盘图标，右键菜单支持显示窗口/暂停恢复网关/退出
+- window: 最小化与关闭可隐藏到托盘，支持启动时自动隐藏
+- store: 新增 DesktopSettings 持久化桌面相关开关
 
-Refs: ROADMAP OPDS 书源服务构建与分发
+Refs: ROADMAP 系统功能增强
 ```
 
 ```
-🐛 fix(api): 修复定时更新策略变更后调度器未正确重载的并发问题
+🐛 fix(relay): 修复流式响应尾包 Token 用量未写入统计的问题
 ```
 
 ```
-📚 docs: 添加 OPDS 书源服务任务到路线图
+📚 docs: 更新 README 与 AGENTS 文档同步桌面集成能力
 ```
 
 ### 约定
