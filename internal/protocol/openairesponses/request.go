@@ -12,7 +12,8 @@ import (
 
 type Request struct {
 	Model           string          `json:"model"`
-	Input           []InputItem     `json:"input"`
+	Input           Input           `json:"input"`
+	Instructions    string          `json:"instructions,omitempty"`
 	Tools           []Tool          `json:"tools,omitempty"`
 	Stream          bool            `json:"stream,omitempty"`
 	MaxOutputTokens *int            `json:"max_output_tokens,omitempty"`
@@ -22,20 +23,55 @@ type Request struct {
 	Text            json.RawMessage `json:"text,omitempty"`
 }
 
+// Input accepts both forms supported by the Responses API: a convenience
+// string and a structured sequence of input items.
+type Input []InputItem
+
+func (in *Input) UnmarshalJSON(data []byte) error {
+	var text string
+	if err := json.Unmarshal(data, &text); err == nil {
+		*in = Input{{Type: "message", Role: string(ir.RoleUser), Content: []InputContentPart{{Type: "input_text", Text: text}}}}
+		return nil
+	}
+	var items []InputItem
+	if err := json.Unmarshal(data, &items); err != nil {
+		return err
+	}
+	*in = items
+	return nil
+}
+
 type InputItem struct {
-	Type      string             `json:"type,omitempty"`
-	Role      string             `json:"role,omitempty"`
-	Content   []InputContentPart `json:"content,omitempty"`
-	CallID    string             `json:"call_id,omitempty"`
-	Name      string             `json:"name,omitempty"`
-	Arguments string             `json:"arguments,omitempty"`
-	Output    string             `json:"output,omitempty"`
+	Type      string       `json:"type,omitempty"`
+	Role      string       `json:"role,omitempty"`
+	Content   InputContent `json:"content,omitempty"`
+	CallID    string       `json:"call_id,omitempty"`
+	Name      string       `json:"name,omitempty"`
+	Arguments string       `json:"arguments,omitempty"`
+	Output    string       `json:"output,omitempty"`
+}
+
+type InputContent []InputContentPart
+
+func (content *InputContent) UnmarshalJSON(data []byte) error {
+	var text string
+	if err := json.Unmarshal(data, &text); err == nil {
+		*content = InputContent{{Type: "input_text", Text: text}}
+		return nil
+	}
+	var parts []InputContentPart
+	if err := json.Unmarshal(data, &parts); err != nil {
+		return err
+	}
+	*content = parts
+	return nil
 }
 
 type InputContentPart struct {
 	Type     string `json:"type"`
 	Text     string `json:"text,omitempty"`
 	ImageURL string `json:"image_url,omitempty"`
+	Detail   string `json:"detail,omitempty"`
 }
 
 type Tool struct {
@@ -43,6 +79,101 @@ type Tool struct {
 	Name        string          `json:"name"`
 	Description string          `json:"description,omitempty"`
 	Parameters  json.RawMessage `json:"parameters,omitempty"`
+}
+
+// ParseRequest converts an OpenAI Responses request into IR. Developer
+// messages are deliberately represented as system messages because IR has no
+// separate developer role; this is the closest lossless routing semantics.
+func ParseRequest(data []byte) (ir.Request, error) {
+	var in Request
+	if err := json.Unmarshal(data, &in); err != nil {
+		return ir.Request{}, err
+	}
+	return in.ToIR()
+}
+
+func (r Request) ToIR() (ir.Request, error) {
+	out := ir.Request{
+		Model:  r.Model,
+		Stream: r.Stream,
+		Params: ir.Params{
+			MaxTokens:      r.MaxOutputTokens,
+			Temperature:    r.Temperature,
+			TopP:           r.TopP,
+			Thinking:       r.Reasoning,
+			ResponseFormat: r.Text,
+		},
+	}
+	if r.Instructions != "" {
+		out.Messages = append(out.Messages, ir.Message{Role: ir.RoleSystem, Content: []ir.ContentBlock{ir.Text(r.Instructions)}})
+	}
+	for _, tool := range r.Tools {
+		if tool.Type != "function" {
+			return ir.Request{}, fmt.Errorf("unsupported OpenAI Responses tool type %q", tool.Type)
+		}
+		out.Tools = append(out.Tools, ir.Tool{Type: "function", Name: tool.Name, Description: tool.Description, Parameters: objectOrEmpty(tool.Parameters)})
+	}
+	for _, item := range r.Input {
+		switch item.Type {
+		case "", "message":
+			role, err := responseInputRole(item.Role)
+			if err != nil {
+				return ir.Request{}, err
+			}
+			blocks, err := responseInputBlocks(item.Content)
+			if err != nil {
+				return ir.Request{}, err
+			}
+			out.Messages = append(out.Messages, ir.Message{Role: role, Content: blocks})
+		case "function_call":
+			arguments := json.RawMessage(item.Arguments)
+			if len(arguments) == 0 {
+				arguments = json.RawMessage(`{}`)
+			}
+			if !json.Valid(arguments) {
+				return ir.Request{}, fmt.Errorf("OpenAI Responses function_call arguments must contain JSON")
+			}
+			out.Messages = append(out.Messages, ir.Message{Role: ir.RoleAssistant, Content: []ir.ContentBlock{ir.ToolCall(item.CallID, item.Name, arguments)}})
+		case "function_call_output":
+			out.Messages = append(out.Messages, ir.Message{Role: ir.RoleTool, Content: []ir.ContentBlock{ir.ToolResult(item.CallID, item.Output)}})
+		default:
+			return ir.Request{}, fmt.Errorf("unsupported OpenAI Responses input item type %q", item.Type)
+		}
+	}
+	return out, nil
+}
+
+func responseInputRole(role string) (ir.Role, error) {
+	switch role {
+	case "system", "developer":
+		// IR intentionally has no developer role; system is its closest
+		// available control-message representation.
+		return ir.RoleSystem, nil
+	case "", "user":
+		return ir.RoleUser, nil
+	case "assistant":
+		return ir.RoleAssistant, nil
+	default:
+		return "", fmt.Errorf("unsupported OpenAI Responses input role %q", role)
+	}
+}
+
+func responseInputBlocks(parts InputContent) ([]ir.ContentBlock, error) {
+	blocks := make([]ir.ContentBlock, 0, len(parts))
+	for _, part := range parts {
+		switch part.Type {
+		case "input_text", "output_text":
+			blocks = append(blocks, ir.Text(part.Text))
+		case "input_image":
+			if part.ImageURL == "" {
+				return nil, fmt.Errorf("OpenAI Responses input_image requires image_url")
+			}
+			blocks = append(blocks, ir.Image(part.ImageURL, part.Detail))
+		default:
+			return nil, fmt.Errorf("unsupported OpenAI Responses content part %q", part.Type)
+		}
+	}
+	return blocks, nil
 }
 
 func ToProviderRequest(req ir.Request) (Request, error) {
@@ -216,7 +347,7 @@ func inputItemsFromIR(msg ir.Message) ([]InputItem, error) {
 		case ir.BlockText:
 			item.Content = append(item.Content, InputContentPart{Type: "input_text", Text: block.Text})
 		case ir.BlockImage:
-			item.Content = append(item.Content, InputContentPart{Type: "input_image", ImageURL: block.ImageURL})
+			item.Content = append(item.Content, InputContentPart{Type: "input_image", ImageURL: block.ImageURL, Detail: block.Detail})
 		case ir.BlockThinking:
 			continue
 		case ir.BlockToolCall:

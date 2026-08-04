@@ -112,6 +112,139 @@ func TestChatCompletionRelayAndLogs(t *testing.T) {
 	}
 }
 
+func TestNativeInboundProtocolsRelayAndAttributeAPIKeys(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl_test","model":"gpt-test","choices":[{"index":0,"message":{"role":"assistant","content":"pong"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":2}}`))
+	}))
+	defer upstream.Close()
+
+	s := openRelayStore(t)
+	defer s.Close()
+	if _, err := s.CreateProvider(store.ProviderInput{ID: "p1", Name: "P1", Type: "openai", BaseURL: upstream.URL + "/v1"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CreateModel(store.ModelInput{ID: "m1", ProviderID: "p1", Name: "M1"}); err != nil {
+		t.Fatal(err)
+	}
+	apiKey, err := s.CreateAPIKey(store.APIKeyInput{Name: "Native client"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	relay := New(s)
+	server := httptest.NewServer(relay)
+	defer server.Close()
+
+	tests := []struct {
+		name       string
+		path       string
+		body       string
+		header     string
+		expectJSON string
+	}{
+		{name: "anthropic", path: "/v1/messages", header: "X-Api-Key", body: `{"model":"p1/m1","max_tokens":8,"messages":[{"role":"user","content":[{"type":"text","text":"ping"}]}]}`, expectJSON: `"type":"message"`},
+		{name: "gemini header key", path: "/v1beta/models/p1%2Fm1:generateContent", header: "X-Goog-Api-Key", body: `{"contents":[{"role":"user","parts":[{"text":"ping"}]}]}`, expectJSON: `"candidates"`},
+		{name: "gemini query key", path: "/v1beta/models/p1%2Fm1:generateContent?key=", body: `{"contents":[{"role":"user","parts":[{"text":"ping"}]}]}`, expectJSON: `"candidates"`},
+		{name: "responses", path: "/v1/responses", header: "Authorization", body: `{"model":"p1/m1","input":"ping"}`, expectJSON: `"object":"response"`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := tt.path
+			if strings.HasSuffix(path, "?key=") {
+				path += apiKey.Key
+			}
+			req, err := http.NewRequest(http.MethodPost, server.URL+path, strings.NewReader(tt.body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Header.Set("Content-Type", "application/json")
+			if tt.header != "" {
+				value := apiKey.Key
+				if tt.header == "Authorization" {
+					value = "Bearer " + value
+				}
+				req.Header.Set(tt.header, value)
+			}
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			body, err := io.ReadAll(resp.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), tt.expectJSON) {
+				t.Fatalf("status/body = %d/%s", resp.StatusCode, body)
+			}
+		})
+	}
+	server.Close()
+	relay.Close()
+	stats, err := s.TokenStats(store.TokenStatsFilter{AppName: "Native client"})
+	if err != nil || stats.Calls != len(tests) {
+		t.Fatalf("stats/err = %#v/%v", stats, err)
+	}
+}
+
+func TestNativeInboundProtocolsStreamInTheirOwnFormats(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, strings.Join([]string{
+			`data: {"id":"stream_1","model":"gpt-test","choices":[{"index":0,"delta":{"role":"assistant"}}]}`,
+			``,
+			`data: {"id":"stream_1","model":"gpt-test","choices":[{"index":0,"delta":{"content":"pong"},"finish_reason":"stop"}]}`,
+			``,
+			`data: [DONE]`,
+			``,
+		}, "\n"))
+	}))
+	defer upstream.Close()
+	s := openRelayStore(t)
+	defer s.Close()
+	if _, err := s.CreateProvider(store.ProviderInput{ID: "p1", Name: "P1", Type: "openai", BaseURL: upstream.URL + "/v1"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CreateModel(store.ModelInput{ID: "m1", ProviderID: "p1", Name: "M1"}); err != nil {
+		t.Fatal(err)
+	}
+	relay := New(s)
+	defer relay.Close()
+	server := httptest.NewServer(relay)
+	defer server.Close()
+	tests := []struct {
+		name    string
+		path    string
+		body    string
+		expects []string
+	}{
+		{name: "anthropic", path: "/v1/messages", body: `{"model":"p1/m1","max_tokens":8,"stream":true,"messages":[{"role":"user","content":"ping"}]}`, expects: []string{"event: message_start", "event: message_stop"}},
+		{name: "gemini", path: "/v1beta/models/p1%2Fm1:streamGenerateContent?alt=sse", body: `{"contents":[{"role":"user","parts":[{"text":"ping"}]}]}`, expects: []string{`"candidates"`, `"finishReason":"STOP"`}},
+		{name: "responses", path: "/v1/responses", body: `{"model":"p1/m1","stream":true,"input":"ping"}`, expects: []string{"event: response.created", "event: response.completed"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resp, err := http.Post(server.URL+tt.path, "application/json", strings.NewReader(tt.body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			body, err := io.ReadAll(resp.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("status/body = %d/%s", resp.StatusCode, body)
+			}
+			for _, expected := range tt.expects {
+				if !strings.Contains(string(body), expected) {
+					t.Fatalf("missing %q in stream: %s", expected, body)
+				}
+			}
+		})
+	}
+}
+
 func TestChatCompletionRelayFallsBackToEstimatedUsage(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

@@ -786,8 +786,18 @@ func (s *Store) AppNameForAuthorization(header string) string {
 	if !ok || !strings.EqualFold(prefix, "Bearer") || strings.TrimSpace(token) == "" {
 		return NoAppName
 	}
+	return s.AppNameForAPIKey(token)
+}
+
+// AppNameForAPIKey resolves a raw gateway API key. Native Anthropic and
+// Gemini clients pass the key outside the Authorization: Bearer header.
+func (s *Store) AppNameForAPIKey(apiKey string) string {
+	apiKey = strings.TrimSpace(apiKey)
+	if apiKey == "" {
+		return NoAppName
+	}
 	var name string
-	err := s.db.QueryRow(`SELECT name FROM api_keys WHERE key = ? AND deleted_at IS NULL`, strings.TrimSpace(token)).Scan(&name)
+	err := s.db.QueryRow(`SELECT name FROM api_keys WHERE key = ? AND deleted_at IS NULL`, apiKey).Scan(&name)
 	if err != nil || strings.TrimSpace(name) == "" {
 		return NoAppName
 	}

@@ -324,6 +324,9 @@ func TestAPIKeyCRUDAndAuthorizationResolution(t *testing.T) {
 	if got := s.AppNameForAuthorization("Bearer " + key.Key); got != "Raycast" {
 		t.Fatalf("resolved app = %q", got)
 	}
+	if got := s.AppNameForAPIKey(key.Key); got != "Raycast" {
+		t.Fatalf("raw key resolved app = %q", got)
+	}
 	for _, header := range []string{"", "Basic " + key.Key, "Bearer", "Bearer   "} {
 		if got := s.AppNameForAuthorization(header); got != NoAppName {
 			t.Fatalf("header %q resolved app = %q", header, got)

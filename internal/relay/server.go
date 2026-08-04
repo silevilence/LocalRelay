@@ -64,6 +64,16 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handleModels(w)
 	case r.Method == http.MethodPost && r.URL.Path == "/v1/chat/completions":
 		s.handleChat(w, r)
+	case r.Method == http.MethodPost && r.URL.Path == "/v1/messages":
+		s.handleAnthropic(w, r)
+	case r.Method == http.MethodPost && r.URL.Path == "/v1/responses":
+		s.handleResponses(w, r)
+	case r.Method == http.MethodPost:
+		if model, stream, ok := geminiInboundModel(r); ok {
+			s.handleGemini(w, r, model, stream)
+			return
+		}
+		writeError(w, http.StatusNotFound, "not_found", "route not found")
 	default:
 		writeError(w, http.StatusNotFound, "not_found", "route not found")
 	}
@@ -86,9 +96,72 @@ func (s *Server) handleModels(w http.ResponseWriter) {
 	writeJSON(w, http.StatusOK, map[string]any{"object": "list", "data": data})
 }
 
-func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
+type inboundRequest struct {
+	model  string
+	stream bool
+	toIR   func(capabilities.Provider) (ir.Request, error)
+}
+
+type inboundRequestParser func([]byte) (inboundRequest, error)
+type clientResponseWriter func(ir.Response, capabilities.Provider) (any, error)
+type clientStreamWriter func(io.Writer, capabilities.Provider) func(ir.StreamEvent) error
+type nativeResponseWriter func(ir.Response) (any, error)
+type nativeStreamWriter func(io.Writer) func(ir.StreamEvent) error
+
+func (s *Server) handleAnthropic(w http.ResponseWriter, r *http.Request) {
+	s.handleNativeRequest(w, r, "anthropic_messages", s.store.AppNameForAPIKey(r.Header.Get("X-Api-Key")), anthropic.ParseRequest, func(resp ir.Response) (any, error) {
+		return anthropic.FromIRResponse(resp)
+	}, func(w io.Writer) func(ir.StreamEvent) error {
+		return func(event ir.StreamEvent) error { return anthropic.WriteStreamEvent(w, event) }
+	})
+}
+
+func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
+	s.handleNativeRequest(w, r, "openai_responses", s.store.AppNameForAuthorization(r.Header.Get("Authorization")), openairesponses.ParseRequest, func(resp ir.Response) (any, error) {
+		return openairesponses.FromIRResponse(resp)
+	}, func(w io.Writer) func(ir.StreamEvent) error {
+		writer := openairesponses.NewStreamWriter(w)
+		return writer.Write
+	})
+}
+
+func (s *Server) handleGemini(w http.ResponseWriter, r *http.Request, model string, stream bool) {
+	appName := s.store.AppNameForAPIKey(r.Header.Get("X-Goog-Api-Key"))
+	if appName == store.NoAppName {
+		appName = s.store.AppNameForAPIKey(r.URL.Query().Get("key"))
+	}
+	s.handleNativeRequest(w, r, "gemini", appName, func(data []byte) (ir.Request, error) {
+		return gemini.ParseRequest(data, model, stream)
+	}, func(resp ir.Response) (any, error) {
+		return gemini.FromIRResponse(resp)
+	}, func(w io.Writer) func(ir.StreamEvent) error {
+		return func(event ir.StreamEvent) error { return gemini.WriteStreamEvent(w, event) }
+	})
+}
+
+func (s *Server) handleNativeRequest(w http.ResponseWriter, r *http.Request, protocol string, appName string, parse func([]byte) (ir.Request, error), responseWriter nativeResponseWriter, streamWriter nativeStreamWriter) {
+	s.handleClientRequest(w, r, protocol, appName, func(data []byte) (inboundRequest, error) {
+		request, err := parse(data)
+		if err != nil {
+			return inboundRequest{}, err
+		}
+		return inboundRequest{
+			model:  request.Model,
+			stream: request.Stream,
+			toIR: func(capabilities.Provider) (ir.Request, error) {
+				return request, nil
+			},
+		}, nil
+	}, func(response ir.Response, _ capabilities.Provider) (any, error) {
+		return responseWriter(response)
+	}, func(w io.Writer, _ capabilities.Provider) func(ir.StreamEvent) error {
+		return streamWriter(w)
+	})
+}
+
+func (s *Server) handleClientRequest(w http.ResponseWriter, r *http.Request, protocol string, appName string, parse inboundRequestParser, responseWriter clientResponseWriter, streamWriter clientStreamWriter) {
 	start := time.Now().UTC()
-	log := store.CallLog{Protocol: "openai_chat", AppName: s.store.AppNameForAuthorization(r.Header.Get("Authorization")), StartedAt: start.Format(time.RFC3339)}
+	log := store.CallLog{Protocol: protocol, AppName: appName, StartedAt: start.Format(time.RFC3339)}
 	status := http.StatusOK
 	defer func() {
 		log.EndedAt = time.Now().UTC().Format(time.RFC3339)
@@ -103,15 +176,15 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		writeError(w, status, "request_too_large", err.Error())
 		return
 	}
-	var clientReq openaichat.Request
-	if err := json.Unmarshal(body, &clientReq); err != nil {
+	incoming, err := parse(body)
+	if err != nil {
 		status = http.StatusBadRequest
 		log.Error = err.Error()
 		writeError(w, status, "bad_request", err.Error())
 		return
 	}
-	log.Stream = clientReq.Stream
-	routed, err := s.store.GetRoutedModel(clientReq.Model)
+	log.Stream = incoming.stream
+	routed, err := s.store.GetRoutedModel(incoming.model)
 	if err != nil {
 		status = routeStatus(err)
 		log.Error = err.Error()
@@ -126,9 +199,10 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		writeError(w, status, "bad_provider_capabilities", err.Error())
 		return
 	}
+	// Call logs record the protocol used for the upstream provider, matching
+	// the pre-existing OpenAI Chat entrypoint semantics.
 	log.Protocol = providerCapabilities.Protocol
-
-	irReq, err := clientReq.ToIRWithCapabilities(providerCapabilities)
+	irReq, err := incoming.toIR(providerCapabilities)
 	if err != nil {
 		status = http.StatusBadRequest
 		log.Error = err.Error()
@@ -136,7 +210,6 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	irReq.Model = routed.Model.ID
-
 	providerReq, err := toProviderRequest(irReq, providerCapabilities)
 	if err != nil {
 		status = http.StatusBadRequest
@@ -151,8 +224,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		writeError(w, status, "marshal_error", err.Error())
 		return
 	}
-
-	upstreamResp, err := s.postProvider(r.Context(), routed.Provider, providerCapabilities, routed.Model.ID, clientReq.Stream, upstreamBody)
+	upstreamResp, err := s.postProvider(r.Context(), routed.Provider, providerCapabilities, routed.Model.ID, irReq.Stream, upstreamBody)
 	if err != nil {
 		status = http.StatusBadGateway
 		log.Error = err.Error()
@@ -160,14 +232,14 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer upstreamResp.Body.Close()
-	if clientReq.Stream && upstreamResp.StatusCode >= 200 && upstreamResp.StatusCode < 300 {
+	if irReq.Stream && upstreamResp.StatusCode >= 200 && upstreamResp.StatusCode < 300 {
 		if _, ok := w.(http.Flusher); !ok {
 			status = http.StatusInternalServerError
 			log.Error = "streaming is not supported by response writer"
 			writeError(w, status, "streaming_unavailable", log.Error)
 			return
 		}
-		if err := s.streamProviderResponse(r.Context(), w, upstreamResp.Body, providerCapabilities, routed.Provider.ID+"/"+routed.Model.ID, irReq, &log); err != nil {
+		if err := s.streamNativeProviderResponse(r.Context(), w, upstreamResp.Body, providerCapabilities, routed.Provider.ID+"/"+routed.Model.ID, irReq, &log, streamWriter); err != nil {
 			log.Error = err.Error()
 			if errors.Is(err, context.Canceled) {
 				status = statusClientClosedRequest
@@ -192,7 +264,6 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write(respBody)
 		return
 	}
-
 	irResp, err := parseProviderResponse(respBody, providerCapabilities)
 	if err != nil {
 		status = http.StatusBadGateway
@@ -209,8 +280,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	log.OutputTokens = irResp.Usage.OutputTokens
 	log.CacheCreationInputTokens = irResp.Usage.CacheCreationInputTokens
 	log.CacheReadInputTokens = irResp.Usage.CacheReadInputTokens
-
-	clientResp, err := openaichat.FromIRResponseWithCapabilities(irResp, providerCapabilities)
+	clientResp, err := responseWriter(irResp, providerCapabilities)
 	if err != nil {
 		status = http.StatusBadGateway
 		log.Error = err.Error()
@@ -220,7 +290,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, status, clientResp)
 }
 
-func (s *Server) streamProviderResponse(ctx context.Context, w http.ResponseWriter, body io.Reader, cfg capabilities.Provider, model string, request ir.Request, log *store.CallLog) error {
+func (s *Server) streamNativeProviderResponse(ctx context.Context, w http.ResponseWriter, body io.Reader, cfg capabilities.Provider, model string, request ir.Request, log *store.CallLog, newWriter clientStreamWriter) error {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		return errors.New("streaming is not supported by response writer")
@@ -230,6 +300,7 @@ func (s *Server) streamProviderResponse(ctx context.Context, w http.ResponseWrit
 	w.Header().Set("X-Accel-Buffering", "no")
 	w.WriteHeader(http.StatusOK)
 	flusher.Flush()
+	writer := newWriter(w, cfg)
 	var output strings.Builder
 	hasUsage := false
 	hasStreamError := false
@@ -254,15 +325,10 @@ func (s *Server) streamProviderResponse(ctx context.Context, w http.ResponseWrit
 		if event.Type == ir.StreamError {
 			hasStreamError = true
 		}
-		if err := openaichat.WriteStreamEvent(w, event, cfg); err != nil {
+		if err := writer(event); err != nil {
 			return err
 		}
 		flusher.Flush()
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
 		return nil
 	})
 	if err == nil && !hasUsage && !hasStreamError {
@@ -272,6 +338,52 @@ func (s *Server) streamProviderResponse(ctx context.Context, w http.ResponseWrit
 		log.TokenEstimated = true
 	}
 	return err
+}
+
+func geminiInboundModel(r *http.Request) (string, bool, bool) {
+	for _, prefix := range []string{"/v1beta/models/", "/v1/models/"} {
+		path := r.URL.EscapedPath()
+		if !strings.HasPrefix(path, prefix) {
+			continue
+		}
+		path = strings.TrimPrefix(path, prefix)
+		stream := strings.HasSuffix(path, ":streamGenerateContent")
+		if stream {
+			path = strings.TrimSuffix(path, ":streamGenerateContent")
+		} else if strings.HasSuffix(path, ":generateContent") {
+			path = strings.TrimSuffix(path, ":generateContent")
+		} else {
+			continue
+		}
+		model, err := url.PathUnescape(path)
+		if err != nil || strings.TrimSpace(model) == "" {
+			return "", false, false
+		}
+		return model, stream, true
+	}
+	return "", false, false
+}
+
+func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
+	s.handleClientRequest(w, r, "openai_chat", s.store.AppNameForAuthorization(r.Header.Get("Authorization")), parseOpenAIChatRequest, func(response ir.Response, cfg capabilities.Provider) (any, error) {
+		return openaichat.FromIRResponseWithCapabilities(response, cfg)
+	}, func(w io.Writer, cfg capabilities.Provider) func(ir.StreamEvent) error {
+		return func(event ir.StreamEvent) error { return openaichat.WriteStreamEvent(w, event, cfg) }
+	})
+}
+
+func parseOpenAIChatRequest(data []byte) (inboundRequest, error) {
+	var request openaichat.Request
+	if err := json.Unmarshal(data, &request); err != nil {
+		return inboundRequest{}, err
+	}
+	return inboundRequest{model: request.Model, stream: request.Stream, toIR: request.ToIRWithCapabilities}, nil
+}
+
+func (s *Server) streamProviderResponse(ctx context.Context, w http.ResponseWriter, body io.Reader, cfg capabilities.Provider, model string, request ir.Request, log *store.CallLog) error {
+	return s.streamNativeProviderResponse(ctx, w, body, cfg, model, request, log, func(w io.Writer, cfg capabilities.Provider) func(ir.StreamEvent) error {
+		return func(event ir.StreamEvent) error { return openaichat.WriteStreamEvent(w, event, cfg) }
+	})
 }
 
 func (s *Server) queueLog(log store.CallLog) {

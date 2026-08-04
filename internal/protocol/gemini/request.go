@@ -29,10 +29,149 @@ type FunctionDeclaration struct {
 }
 
 type GenerationConfig struct {
-	MaxOutputTokens *int     `json:"maxOutputTokens,omitempty"`
-	Temperature     *float64 `json:"temperature,omitempty"`
-	TopP            *float64 `json:"topP,omitempty"`
-	StopSequences   []string `json:"stopSequences,omitempty"`
+	MaxOutputTokens *int            `json:"maxOutputTokens,omitempty"`
+	Temperature     *float64        `json:"temperature,omitempty"`
+	TopP            *float64        `json:"topP,omitempty"`
+	StopSequences   []string        `json:"stopSequences,omitempty"`
+	ThinkingConfig  json.RawMessage `json:"thinkingConfig,omitempty"`
+}
+
+// ParseRequest converts a Gemini generateContent request into the gateway's
+// protocol-neutral representation. Gemini chooses the model and stream mode
+// from its URL, so callers supply those values separately.
+func ParseRequest(data []byte, model string, stream bool) (ir.Request, error) {
+	var in Request
+	if err := json.Unmarshal(data, &in); err != nil {
+		return ir.Request{}, err
+	}
+	return in.ToIR(model, stream)
+}
+
+func (r Request) ToIR(model string, stream bool) (ir.Request, error) {
+	out := ir.Request{
+		Model:  model,
+		Stream: stream,
+		Params: ir.Params{
+			MaxTokens:   r.GenerationConfig.MaxOutputTokens,
+			Temperature: r.GenerationConfig.Temperature,
+			TopP:        r.GenerationConfig.TopP,
+			Stop:        r.GenerationConfig.StopSequences,
+			Thinking:    r.GenerationConfig.ThinkingConfig,
+		},
+	}
+	if r.SystemInstruction != nil {
+		blocks, err := inputBlocks(r.SystemInstruction.Parts)
+		if err != nil {
+			return ir.Request{}, err
+		}
+		if len(blocks) > 0 {
+			out.Messages = append(out.Messages, ir.Message{Role: ir.RoleSystem, Content: blocks})
+		}
+	}
+	for _, tool := range r.Tools {
+		for _, declaration := range tool.FunctionDeclarations {
+			out.Tools = append(out.Tools, ir.Tool{Type: "function", Name: declaration.Name, Description: declaration.Description, Parameters: objectOrEmpty(declaration.Parameters)})
+		}
+	}
+	callIDs := map[string][]string{}
+	nextCallID := 1
+	for _, content := range r.Contents {
+		role, err := irRole(content.Role)
+		if err != nil {
+			return ir.Request{}, err
+		}
+		var ordinary []ir.ContentBlock
+		flushOrdinary := func() {
+			if len(ordinary) > 0 {
+				out.Messages = append(out.Messages, ir.Message{Role: role, Content: ordinary})
+				ordinary = nil
+			}
+		}
+		for _, part := range content.Parts {
+			switch {
+			case part.FunctionResponse != nil:
+				result, err := functionResponseResult(part.FunctionResponse.Response)
+				if err != nil {
+					return ir.Request{}, err
+				}
+				ids := callIDs[part.FunctionResponse.Name]
+				if len(ids) == 0 {
+					// Gemini function responses identify calls only by name. A
+					// response without a preceding call is ambiguous in IR, so it
+					// is rejected rather than silently misrouting the result.
+					return ir.Request{}, fmt.Errorf("Gemini functionResponse %q has no preceding functionCall", part.FunctionResponse.Name)
+				}
+				flushOrdinary()
+				out.Messages = append(out.Messages, ir.Message{Role: ir.RoleTool, Content: []ir.ContentBlock{ir.ToolResult(ids[0], result)}})
+				callIDs[part.FunctionResponse.Name] = ids[1:]
+			case part.FunctionCall != nil:
+				id := fmt.Sprintf("gemini-call-%d", nextCallID)
+				nextCallID++
+				callIDs[part.FunctionCall.Name] = append(callIDs[part.FunctionCall.Name], id)
+				ordinary = append(ordinary, ir.ToolCall(id, part.FunctionCall.Name, objectOrEmpty(part.FunctionCall.Args)))
+			case part.InlineData != nil:
+				if part.InlineData.MIMEType == "" || part.InlineData.Data == "" {
+					return ir.Request{}, fmt.Errorf("Gemini inlineData requires mimeType and data")
+				}
+				if _, err := base64.StdEncoding.DecodeString(part.InlineData.Data); err != nil {
+					return ir.Request{}, err
+				}
+				ordinary = append(ordinary, ir.Image("data:"+part.InlineData.MIMEType+";base64,"+part.InlineData.Data, ""))
+			case part.Thought:
+				ordinary = append(ordinary, ir.Thinking(part.Text, part.ThoughtSignature))
+			case part.Text != "":
+				ordinary = append(ordinary, ir.Text(part.Text))
+			default:
+				return ir.Request{}, fmt.Errorf("unsupported Gemini content part")
+			}
+		}
+		flushOrdinary()
+	}
+	return out, nil
+}
+
+func inputBlocks(parts []Part) ([]ir.ContentBlock, error) {
+	blocks := make([]ir.ContentBlock, 0, len(parts))
+	for _, part := range parts {
+		if part.Text == "" {
+			return nil, fmt.Errorf("unsupported Gemini system instruction part")
+		}
+		blocks = append(blocks, ir.Text(part.Text))
+	}
+	return blocks, nil
+}
+
+func irRole(role string) (ir.Role, error) {
+	switch role {
+	case "", "user":
+		return ir.RoleUser, nil
+	case "model":
+		return ir.RoleAssistant, nil
+	default:
+		return "", fmt.Errorf("unsupported Gemini role %q", role)
+	}
+}
+
+func functionResponseResult(response json.RawMessage) (string, error) {
+	if len(response) == 0 {
+		return "", nil
+	}
+	var result struct {
+		Result any `json:"result"`
+	}
+	if err := json.Unmarshal(response, &result); err != nil {
+		return "", err
+	}
+	if result.Result == nil {
+		return string(response), nil
+	}
+	switch value := result.Result.(type) {
+	case string:
+		return value, nil
+	default:
+		data, err := json.Marshal(value)
+		return string(data), err
+	}
 }
 
 func ToProviderRequest(req ir.Request) (Request, error) {
@@ -41,6 +180,7 @@ func ToProviderRequest(req ir.Request) (Request, error) {
 		Temperature:     req.Params.Temperature,
 		TopP:            req.Params.TopP,
 		StopSequences:   req.Params.Stop,
+		ThinkingConfig:  req.Params.Thinking,
 	}}
 	if len(req.Tools) > 0 {
 		tool := Tool{FunctionDeclarations: make([]FunctionDeclaration, 0, len(req.Tools))}

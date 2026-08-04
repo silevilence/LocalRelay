@@ -15,7 +15,7 @@ type Request struct {
 	Model         string          `json:"model"`
 	MaxTokens     *int            `json:"max_tokens,omitempty"`
 	Messages      []Message       `json:"messages"`
-	System        string          `json:"system,omitempty"`
+	System        System          `json:"system,omitempty"`
 	Tools         []Tool          `json:"tools,omitempty"`
 	Stream        bool            `json:"stream,omitempty"`
 	Temperature   *float64        `json:"temperature,omitempty"`
@@ -25,8 +25,52 @@ type Request struct {
 }
 
 type Message struct {
-	Role    string         `json:"role"`
-	Content []ContentBlock `json:"content"`
+	Role    string        `json:"role"`
+	Content ContentBlocks `json:"content"`
+}
+
+// System and ContentBlocks accept the shorthand string forms accepted by the
+// Anthropic API, while keeping the canonical structured form for output.
+type System string
+
+func (s *System) UnmarshalJSON(data []byte) error {
+	var text string
+	if err := json.Unmarshal(data, &text); err == nil {
+		*s = System(text)
+		return nil
+	}
+	var blocks []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(data, &blocks); err != nil {
+		return err
+	}
+	var value strings.Builder
+	for _, block := range blocks {
+		if block.Type != "text" {
+			return fmt.Errorf("unsupported Anthropic system block %q", block.Type)
+		}
+		value.WriteString(block.Text)
+	}
+	*s = System(value.String())
+	return nil
+}
+
+type ContentBlocks []ContentBlock
+
+func (blocks *ContentBlocks) UnmarshalJSON(data []byte) error {
+	var text string
+	if err := json.Unmarshal(data, &text); err == nil {
+		*blocks = ContentBlocks{{Type: "text", Text: text}}
+		return nil
+	}
+	var value []ContentBlock
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	*blocks = value
+	return nil
 }
 
 type Tool struct {
@@ -40,6 +84,128 @@ type ImageSource struct {
 	MediaType string `json:"media_type,omitempty"`
 	Data      string `json:"data,omitempty"`
 	URL       string `json:"url,omitempty"`
+}
+
+// ParseRequest converts an Anthropic Messages request into the gateway's
+// protocol-neutral representation. Anthropic puts tool results in user
+// messages; each result becomes an IR tool message so OpenAI-compatible
+// upstreams can represent it without losing its tool_use_id.
+func ParseRequest(data []byte) (ir.Request, error) {
+	var in Request
+	if err := json.Unmarshal(data, &in); err != nil {
+		return ir.Request{}, err
+	}
+	return in.ToIR()
+}
+
+func (r Request) ToIR() (ir.Request, error) {
+	out := ir.Request{
+		Model:  r.Model,
+		Stream: r.Stream,
+		Params: ir.Params{
+			MaxTokens:   r.MaxTokens,
+			Temperature: r.Temperature,
+			TopP:        r.TopP,
+			Stop:        r.StopSequences,
+			Thinking:    r.Thinking,
+		},
+	}
+	if r.System != "" {
+		out.Messages = append(out.Messages, ir.Message{Role: ir.RoleSystem, Content: []ir.ContentBlock{ir.Text(string(r.System))}})
+	}
+	for _, tool := range r.Tools {
+		out.Tools = append(out.Tools, ir.Tool{Type: "function", Name: tool.Name, Description: tool.Description, Parameters: defaultRaw(tool.InputSchema, `{}`)})
+	}
+	for _, message := range r.Messages {
+		if message.Role != "user" && message.Role != "assistant" {
+			return ir.Request{}, fmt.Errorf("unsupported Anthropic role %q", message.Role)
+		}
+		var ordinary []ir.ContentBlock
+		flushOrdinary := func() {
+			if len(ordinary) > 0 {
+				out.Messages = append(out.Messages, ir.Message{Role: ir.Role(message.Role), Content: ordinary})
+				ordinary = nil
+			}
+		}
+		for _, block := range message.Content {
+			switch block.Type {
+			case "text":
+				ordinary = append(ordinary, ir.Text(block.Text))
+			case "image":
+				imageURL, err := imageURLFromSource(block.Source)
+				if err != nil {
+					return ir.Request{}, err
+				}
+				ordinary = append(ordinary, ir.Image(imageURL, ""))
+			case "thinking":
+				ordinary = append(ordinary, ir.Thinking(block.Thinking, block.Signature))
+			case "tool_use":
+				ordinary = append(ordinary, ir.ToolCall(block.ID, block.Name, defaultRaw(block.Input, `{}`)))
+			case "tool_result":
+				result, err := toolResultText(block.Content)
+				if err != nil {
+					return ir.Request{}, err
+				}
+				flushOrdinary()
+				out.Messages = append(out.Messages, ir.Message{Role: ir.RoleTool, Content: []ir.ContentBlock{ir.ToolResult(block.ToolUseID, result)}})
+			default:
+				return ir.Request{}, fmt.Errorf("unsupported Anthropic content block %q", block.Type)
+			}
+		}
+		flushOrdinary()
+	}
+	return out, nil
+}
+
+func imageURLFromSource(source *ImageSource) (string, error) {
+	if source == nil {
+		return "", fmt.Errorf("Anthropic image block requires a source")
+	}
+	switch source.Type {
+	case "url":
+		if strings.TrimSpace(source.URL) == "" {
+			return "", fmt.Errorf("Anthropic URL image source requires a URL")
+		}
+		return source.URL, nil
+	case "base64":
+		if source.MediaType == "" || source.Data == "" {
+			return "", fmt.Errorf("Anthropic base64 image source requires media_type and data")
+		}
+		if _, err := base64.StdEncoding.DecodeString(source.Data); err != nil {
+			return "", err
+		}
+		return "data:" + source.MediaType + ";base64," + source.Data, nil
+	default:
+		return "", fmt.Errorf("unsupported Anthropic image source type %q", source.Type)
+	}
+}
+
+func toolResultText(content any) (string, error) {
+	switch value := content.(type) {
+	case nil:
+		return "", nil
+	case string:
+		return value, nil
+	case []any:
+		// IR tool results carry only a string. Anthropic also permits richer
+		// result blocks (including is_error metadata), which cannot be
+		// represented by the current IR; preserve their textual content.
+		var text strings.Builder
+		for _, raw := range value {
+			block, ok := raw.(map[string]any)
+			if !ok || block["type"] != "text" {
+				return "", fmt.Errorf("unsupported Anthropic tool_result content")
+			}
+			part, ok := block["text"].(string)
+			if !ok {
+				return "", fmt.Errorf("Anthropic tool_result text content requires text")
+			}
+			text.WriteString(part)
+		}
+		return text.String(), nil
+	default:
+		return "", fmt.Errorf("unsupported Anthropic tool_result content %T", content)
+	}
 }
 
 func ToProviderRequest(req ir.Request) (Request, error) {
@@ -60,7 +226,7 @@ func ToProviderRequest(req ir.Request) (Request, error) {
 	}
 	for _, msg := range req.Messages {
 		if msg.Role == ir.RoleSystem {
-			out.System += textOnly(msg.Content)
+			out.System += System(textOnly(msg.Content))
 			continue
 		}
 		role, err := anthropicRole(msg.Role)
