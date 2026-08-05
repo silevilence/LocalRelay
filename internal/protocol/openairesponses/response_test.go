@@ -102,6 +102,29 @@ func TestWriteStreamEvent(t *testing.T) {
 	}
 }
 
+func TestStreamWriterFinalizesTextMessageWithItemID(t *testing.T) {
+	var out strings.Builder
+	writer := NewStreamWriter(&out)
+	for _, event := range []ir.StreamEvent{
+		{Type: ir.StreamMessageStart, ID: "resp_1", Model: "gpt-test"},
+		{Type: ir.StreamChoiceStart, ChoiceIndex: 0, Role: ir.RoleAssistant},
+		{Type: ir.StreamContentBlockStart, ChoiceIndex: 0, BlockIndex: 0, BlockType: ir.BlockText},
+		{Type: ir.StreamContentBlockDelta, ChoiceIndex: 0, BlockIndex: 0, BlockType: ir.BlockText, Delta: "hi"},
+		{Type: ir.StreamContentBlockStop, ChoiceIndex: 0, BlockIndex: 0, BlockType: ir.BlockText},
+		{Type: ir.StreamMessageStop},
+	} {
+		if err := writer.Write(event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got := out.String()
+	for _, want := range []string{`"item_id":"msg_resp_1_0"`, `event: response.output_item.done`, `"content":[{"type":"output_text","text":"hi","annotations":[]}]`, `"output":[`} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("missing %q in %s", want, got)
+		}
+	}
+}
+
 func TestRejectsUnsupportedResponseBlock(t *testing.T) {
 	_, err := FromIRResponse(ir.Response{Choices: []ir.Choice{{
 		Message: ir.Message{Role: ir.RoleAssistant, Content: []ir.ContentBlock{ir.Image("https://example.test/a.png", "")}},

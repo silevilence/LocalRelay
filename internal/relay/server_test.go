@@ -341,7 +341,7 @@ func TestNativeStreamsRemainClientCompatibleWithReasoning(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, expected := range []string{"event: response.output_text.delta", `"delta":"pong"`, "event: response.completed"} {
+	for _, expected := range []string{"event: response.output_text.delta", `"item_id":"msg_stream_1_0"`, `"delta":"pong"`, "event: response.output_item.done", `"content":[{"type":"output_text","text":"pong","annotations":[]}]`, `"output":[`, "event: response.completed"} {
 		if !strings.Contains(string(responseBody), expected) {
 			t.Fatalf("Responses stream missing %q: %s", expected, responseBody)
 		}
@@ -363,6 +363,41 @@ func TestNativeStreamsRemainClientCompatibleWithReasoning(t *testing.T) {
 		if !strings.Contains(string(anthropicStream), expected) {
 			t.Fatalf("Anthropic stream missing %q: %s", expected, anthropicStream)
 		}
+	}
+}
+
+func TestResponsesReasoningEffortUsesDeepSeekField(t *testing.T) {
+	var upstream map[string]any
+	upstreamServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&upstream); err != nil {
+			t.Fatal(err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl_test","model":"deepseek-test","choices":[{"index":0,"message":{"role":"assistant","content":"pong"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":2}}`))
+	}))
+	defer upstreamServer.Close()
+	s := openRelayStore(t)
+	defer s.Close()
+	if _, err := s.CreateProvider(store.ProviderInput{ID: "p1", Name: "P1", Type: "deepseek", BaseURL: upstreamServer.URL + "/v1"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CreateModel(store.ModelInput{ID: "m1", ProviderID: "p1", Name: "M1"}); err != nil {
+		t.Fatal(err)
+	}
+	relay := New(s)
+	defer relay.Close()
+	server := httptest.NewServer(relay)
+	defer server.Close()
+	response, err := http.Post(server.URL+"/v1/responses", "application/json", strings.NewReader(`{"model":"p1/m1","input":"ping","reasoning":{"effort":"high"}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", response.StatusCode)
+	}
+	if upstream["reasoning_effort"] != "high" || upstream["thinking"] != nil {
+		t.Fatalf("upstream request = %#v", upstream)
 	}
 }
 

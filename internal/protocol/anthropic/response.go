@@ -152,7 +152,9 @@ func WriteStreamEvent(w io.Writer, event ir.StreamEvent) error {
 	case ir.StreamContentBlockStop:
 		return writeSSE(w, "content_block_stop", map[string]any{"type": "content_block_stop", "index": event.BlockIndex})
 	case ir.StreamMessageDelta:
-		data := map[string]any{"type": "message_delta"}
+		// Anthropic clients require both objects on every message_delta, even
+		// when one side has no new values in this particular event.
+		data := map[string]any{"type": "message_delta", "delta": map[string]any{}, "usage": &Usage{}}
 		if event.StopReason != "" {
 			data["delta"] = map[string]any{"stop_reason": anthropicStop(event.StopReason), "stop_sequence": nil}
 		}

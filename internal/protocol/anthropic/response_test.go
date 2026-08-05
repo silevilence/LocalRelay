@@ -116,6 +116,29 @@ func TestResponseIncludesRequiredUsageAndThinkingSignature(t *testing.T) {
 	}
 }
 
+func TestMessageDeltaAlwaysIncludesDeltaAndUsageObjects(t *testing.T) {
+	for _, event := range []ir.StreamEvent{
+		{Type: ir.StreamMessageDelta, StopReason: "stop"},
+		{Type: ir.StreamMessageDelta, Usage: ir.Usage{InputTokens: 3, OutputTokens: 2}},
+	} {
+		var out strings.Builder
+		if err := WriteStreamEvent(&out, event); err != nil {
+			t.Fatal(err)
+		}
+		payload := strings.TrimPrefix(strings.Split(out.String(), "\n")[1], "data: ")
+		var body map[string]any
+		if err := json.Unmarshal([]byte(payload), &body); err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := body["delta"].(map[string]any); !ok {
+			t.Fatalf("message_delta missing delta object: %s", payload)
+		}
+		if _, ok := body["usage"].(map[string]any); !ok {
+			t.Fatalf("message_delta missing usage object: %s", payload)
+		}
+	}
+}
+
 func TestForEachStreamEventIgnoresPing(t *testing.T) {
 	events, err := ParseStream(strings.NewReader(strings.Join([]string{
 		`event: message_start`,

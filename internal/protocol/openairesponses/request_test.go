@@ -38,3 +38,14 @@ func TestParseRequestAcceptsInstructionsAndStructuredStringContent(t *testing.T)
 		t.Fatalf("request/err = %#v/%v", request, err)
 	}
 }
+
+func TestParseRequestMapsReasoningEffortWithoutThinkingPayload(t *testing.T) {
+	request, err := ParseRequest([]byte(`{"model":"relay/gpt","input":"hello","reasoning":{"effort":"high"}}`))
+	if err != nil || request.Params.ReasoningEffort == nil || *request.Params.ReasoningEffort != "high" || len(request.Params.Thinking) != 0 {
+		t.Fatalf("request/err = %#v/%v", request, err)
+	}
+	provider, err := ToProviderRequest(request)
+	if err != nil || string(provider.Reasoning) != `{"effort":"high"}` {
+		t.Fatalf("provider/err = %#v/%v", provider, err)
+	}
+}

@@ -52,19 +52,29 @@ type OutputTokenDetails struct {
 }
 
 type StreamWriter struct {
-	w         io.Writer
-	response  Response
-	usage     ir.Usage
-	items     map[int]OutputItem
-	text      map[string]string
-	completed bool
+	w            io.Writer
+	response     Response
+	usage        ir.Usage
+	items        map[int]OutputItem
+	messages     map[int]OutputItem
+	order        []int
+	text         map[string]string
+	textParts    map[string]int
+	textEvents   map[string]ir.StreamEvent
+	textOrder    []string
+	finishedText map[string]bool
+	completed    bool
 }
 
 func NewStreamWriter(w io.Writer) *StreamWriter {
 	return &StreamWriter{
-		w:     w,
-		items: map[int]OutputItem{},
-		text:  map[string]string{},
+		w:            w,
+		items:        map[int]OutputItem{},
+		messages:     map[int]OutputItem{},
+		text:         map[string]string{},
+		textParts:    map[string]int{},
+		textEvents:   map[string]ir.StreamEvent{},
+		finishedText: map[string]bool{},
 	}
 }
 
@@ -146,7 +156,8 @@ func (s *StreamWriter) Write(event ir.StreamEvent) error {
 			Status: "in_progress",
 			Role:   string(event.Role),
 		}
-		s.items[event.ChoiceIndex] = item
+		s.messages[event.ChoiceIndex] = item
+		s.order = append(s.order, event.ChoiceIndex)
 		return writeEvent(s.w, "response.output_item.added", map[string]any{
 			"output_index": event.ChoiceIndex,
 			"item":         item,
@@ -173,7 +184,15 @@ func (s *StreamWriter) Write(event ir.StreamEvent) error {
 func (s *StreamWriter) writeBlockStart(event ir.StreamEvent) error {
 	switch event.BlockType {
 	case ir.BlockText:
+		key := contentKey(event)
+		item := s.messages[event.ChoiceIndex]
+		item.Content = append(item.Content, ContentPart{Type: "output_text", Text: "", Annotations: []any{}})
+		s.messages[event.ChoiceIndex] = item
+		s.textParts[key] = len(item.Content) - 1
+		s.textEvents[key] = event
+		s.textOrder = append(s.textOrder, key)
 		return writeEvent(s.w, "response.content_part.added", map[string]any{
+			"item_id":       messageItemID(s.response.ID, event.ChoiceIndex),
 			"output_index":  event.ChoiceIndex,
 			"content_index": event.BlockIndex,
 			"part":          ContentPart{Type: "output_text", Text: "", Annotations: []any{}},
@@ -201,8 +220,13 @@ func (s *StreamWriter) writeBlockStart(event ir.StreamEvent) error {
 func (s *StreamWriter) writeBlockDelta(event ir.StreamEvent) error {
 	switch event.BlockType {
 	case ir.BlockText:
-		s.text[contentKey(event)] += event.Delta
+		key := contentKey(event)
+		s.text[key] += event.Delta
+		item := s.messages[event.ChoiceIndex]
+		item.Content[s.textParts[key]].Text = s.text[key]
+		s.messages[event.ChoiceIndex] = item
 		return writeEvent(s.w, "response.output_text.delta", map[string]any{
+			"item_id":       messageItemID(s.response.ID, event.ChoiceIndex),
 			"output_index":  event.ChoiceIndex,
 			"content_index": event.BlockIndex,
 			"delta":         event.Delta,
@@ -228,12 +252,13 @@ func (s *StreamWriter) writeBlockDelta(event ir.StreamEvent) error {
 func (s *StreamWriter) writeBlockStop(event ir.StreamEvent) error {
 	switch event.BlockType {
 	case ir.BlockText:
-		return writeEvent(s.w, "response.output_text.done", map[string]any{"output_index": event.ChoiceIndex, "content_index": event.BlockIndex, "text": s.text[contentKey(event)]})
+		return s.finishText(event)
 	case ir.BlockThinking:
 		return nil
 	case ir.BlockToolCall:
 		item := s.items[event.BlockIndex]
 		item.Status = "completed"
+		s.response.Output = append(s.response.Output, item)
 		return writeEvents(s.w,
 			streamEvent{"response.function_call_arguments.done", map[string]any{"output_index": event.BlockIndex, "item_id": firstNonEmpty(event.ToolCallID, item.CallID), "arguments": item.Arguments}},
 			streamEvent{"response.output_item.done", map[string]any{"output_index": event.BlockIndex, "item": item}},
@@ -250,7 +275,32 @@ func (s *StreamWriter) complete() error {
 	s.completed = true
 	s.response.Status = "completed"
 	s.response.Usage = usageFromIR(s.usage)
-	return writeEvent(s.w, "response.completed", map[string]any{"response": s.response})
+	events := make([]streamEvent, 0, len(s.textOrder)+len(s.order)+1)
+	for _, key := range s.textOrder {
+		if s.finishedText[key] {
+			continue
+		}
+		event := s.textEvents[key]
+		s.finishedText[key] = true
+		events = append(events, streamEvent{"response.output_text.done", map[string]any{"item_id": messageItemID(s.response.ID, event.ChoiceIndex), "output_index": event.ChoiceIndex, "content_index": event.BlockIndex, "text": s.text[key]}})
+	}
+	for _, index := range s.order {
+		item := s.messages[index]
+		item.Status = "completed"
+		s.response.Output = append(s.response.Output, item)
+		events = append(events, streamEvent{"response.output_item.done", map[string]any{"output_index": index, "item": item}})
+	}
+	events = append(events, streamEvent{"response.completed", map[string]any{"response": s.response}})
+	return writeEvents(s.w, events...)
+}
+
+func (s *StreamWriter) finishText(event ir.StreamEvent) error {
+	key := contentKey(event)
+	if s.finishedText[key] {
+		return nil
+	}
+	s.finishedText[key] = true
+	return writeEvent(s.w, "response.output_text.done", map[string]any{"item_id": messageItemID(s.response.ID, event.ChoiceIndex), "output_index": event.ChoiceIndex, "content_index": event.BlockIndex, "text": s.text[key]})
 }
 
 type streamEvent struct {

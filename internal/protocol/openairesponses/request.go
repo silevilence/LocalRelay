@@ -93,15 +93,19 @@ func ParseRequest(data []byte) (ir.Request, error) {
 }
 
 func (r Request) ToIR() (ir.Request, error) {
+	reasoningEffort, err := parseReasoningEffort(r.Reasoning)
+	if err != nil {
+		return ir.Request{}, err
+	}
 	out := ir.Request{
 		Model:  r.Model,
 		Stream: r.Stream,
 		Params: ir.Params{
-			MaxTokens:      r.MaxOutputTokens,
-			Temperature:    r.Temperature,
-			TopP:           r.TopP,
-			Thinking:       r.Reasoning,
-			ResponseFormat: r.Text,
+			MaxTokens:       r.MaxOutputTokens,
+			Temperature:     r.Temperature,
+			TopP:            r.TopP,
+			ReasoningEffort: reasoningEffort,
+			ResponseFormat:  r.Text,
 		},
 	}
 	if r.Instructions != "" {
@@ -143,6 +147,22 @@ func (r Request) ToIR() (ir.Request, error) {
 	return out, nil
 }
 
+func parseReasoningEffort(raw json.RawMessage) (*string, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil, nil
+	}
+	var reasoning struct {
+		Effort string `json:"effort"`
+	}
+	if err := json.Unmarshal(raw, &reasoning); err != nil {
+		return nil, fmt.Errorf("invalid OpenAI Responses reasoning: %w", err)
+	}
+	if strings.TrimSpace(reasoning.Effort) == "" {
+		return nil, nil
+	}
+	return &reasoning.Effort, nil
+}
+
 func responseInputRole(role string) (ir.Role, error) {
 	switch role {
 	case "system", "developer":
@@ -177,13 +197,23 @@ func responseInputBlocks(parts InputContent) ([]ir.ContentBlock, error) {
 }
 
 func ToProviderRequest(req ir.Request) (Request, error) {
+	reasoning := req.Params.Thinking
+	if len(reasoning) == 0 && req.Params.ReasoningEffort != nil {
+		data, err := json.Marshal(struct {
+			Effort string `json:"effort"`
+		}{Effort: *req.Params.ReasoningEffort})
+		if err != nil {
+			return Request{}, err
+		}
+		reasoning = data
+	}
 	out := Request{
 		Model:           req.Model,
 		Stream:          req.Stream,
 		MaxOutputTokens: req.Params.MaxTokens,
 		Temperature:     req.Params.Temperature,
 		TopP:            req.Params.TopP,
-		Reasoning:       req.Params.Thinking,
+		Reasoning:       reasoning,
 		Text:            req.Params.ResponseFormat,
 	}
 	for _, tool := range req.Tools {
