@@ -44,6 +44,7 @@ type App struct {
 	trayOnce        sync.Once
 	trayGatewayItem trayMenuItem
 	watchCancel     context.CancelFunc
+	listenRelay     func(port int) (net.Listener, error)
 	startMinimized  bool
 	quitting        atomic.Bool
 }
@@ -98,7 +99,7 @@ func (a *App) domReady(ctx context.Context) {
 }
 
 func (a *App) startRelay(port int) error {
-	listener, err := listenRelay(port)
+	listener, err := a.openRelayListener(port)
 	if err != nil {
 		return err
 	}
@@ -107,7 +108,18 @@ func (a *App) startRelay(port int) error {
 }
 
 func listenRelay(port int) (net.Listener, error) {
-	return net.Listen("tcp", net.JoinHostPort("0.0.0.0", strconv.Itoa(port)))
+	return net.Listen("tcp", relayListenAddress(port))
+}
+
+func relayListenAddress(port int) string {
+	return net.JoinHostPort("0.0.0.0", strconv.Itoa(port))
+}
+
+func (a *App) openRelayListener(port int) (net.Listener, error) {
+	if a.listenRelay != nil {
+		return a.listenRelay(port)
+	}
+	return listenRelay(port)
 }
 
 func (a *App) serveRelay(listener net.Listener) {
@@ -163,6 +175,10 @@ func (a *App) DeleteProvider(id string) error {
 
 func (a *App) ListModels(providerID string) ([]store.Model, error) {
 	return a.store.ListModels(providerID)
+}
+
+func (a *App) ListAggregationMemberModels() ([]store.Model, error) {
+	return a.store.ListAggregationMemberModels()
 }
 
 func (a *App) CreateModel(input store.ModelInput) (store.Model, error) {
@@ -456,7 +472,7 @@ func (a *App) SetRelayPort(port int) (int, error) {
 		}
 		return port, nil
 	}
-	listener, err := listenRelay(port)
+	listener, err := a.openRelayListener(port)
 	if err != nil {
 		return 0, fmt.Errorf("port %d is unavailable: %w", port, err)
 	}
@@ -504,7 +520,7 @@ func (a *App) SetRelayServiceEnabled(enabled bool) (bool, error) {
 		if err != nil {
 			return false, err
 		}
-		listener, err := listenRelay(port)
+		listener, err := a.openRelayListener(port)
 		if err != nil {
 			return false, fmt.Errorf("port %d is unavailable: %w", port, err)
 		}

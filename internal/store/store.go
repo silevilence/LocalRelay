@@ -85,25 +85,27 @@ type ProviderInput struct {
 }
 
 type Model struct {
-	ID            string `json:"id"`
-	ProviderID    string `json:"providerId"`
-	Name          string `json:"name"`
-	Capabilities  string `json:"capabilities"`
-	ContextLength int    `json:"contextLength"`
-	MaxTokens     int    `json:"maxTokens"`
-	Enabled       bool   `json:"enabled"`
-	CreatedAt     string `json:"createdAt"`
-	UpdatedAt     string `json:"updatedAt"`
+	ID            string             `json:"id"`
+	ProviderID    string             `json:"providerId"`
+	Name          string             `json:"name"`
+	Capabilities  string             `json:"capabilities"`
+	ContextLength int                `json:"contextLength"`
+	MaxTokens     int                `json:"maxTokens"`
+	Enabled       bool               `json:"enabled"`
+	CreatedAt     string             `json:"createdAt"`
+	UpdatedAt     string             `json:"updatedAt"`
+	Aggregation   *AggregationConfig `json:"aggregation,omitempty"`
 }
 
 type ModelInput struct {
-	ID            string `json:"id"`
-	ProviderID    string `json:"providerId"`
-	Name          string `json:"name"`
-	Capabilities  string `json:"capabilities"`
-	ContextLength int    `json:"contextLength"`
-	MaxTokens     int    `json:"maxTokens"`
-	Enabled       *bool  `json:"enabled,omitempty"`
+	ID            string             `json:"id"`
+	ProviderID    string             `json:"providerId"`
+	Name          string             `json:"name"`
+	Capabilities  string             `json:"capabilities"`
+	ContextLength int                `json:"contextLength"`
+	MaxTokens     int                `json:"maxTokens"`
+	Enabled       *bool              `json:"enabled,omitempty"`
+	Aggregation   *AggregationConfig `json:"aggregation,omitempty"`
 }
 
 type RoutedModel struct {
@@ -144,14 +146,17 @@ type CallLog struct {
 	CacheCreationInputTokens int    `json:"cacheCreationInputTokens"`
 	CacheReadInputTokens     int    `json:"cacheReadInputTokens"`
 	TokenEstimated           bool   `json:"tokenEstimated"`
+	AggregationSource        string `json:"aggregationSource,omitempty"`
+	AggAttempts              string `json:"aggAttempts,omitempty"`
 }
 
 type TokenStatsFilter struct {
-	From       string `json:"from"`
-	To         string `json:"to"`
-	ProviderID string `json:"providerId"`
-	ModelID    string `json:"modelId"`
-	AppName    string `json:"appName"`
+	From              string `json:"from"`
+	To                string `json:"to"`
+	ProviderID        string `json:"providerId"`
+	ModelID           string `json:"modelId"`
+	AppName           string `json:"appName"`
+	AggregationSource string `json:"aggregationSource"`
 }
 
 type TokenStats struct {
@@ -314,6 +319,8 @@ func (s *Store) applyMigrations() error {
 		{5, s.ensureAppSettingsSchema},
 		{6, s.enableVolcengineCodingStreamUsage},
 		{7, s.ensureTokenEstimateColumn},
+		{8, s.ensureAggregationSchema},
+		{9, s.migrateAggregationConfigKeys},
 	}
 	for _, migration := range migrations {
 		var exists int
@@ -343,6 +350,64 @@ func (s *Store) ensureTokenEstimateColumn() error {
 	}
 	_, err = s.db.Exec(`ALTER TABLE call_logs ADD COLUMN token_estimated INTEGER NOT NULL DEFAULT 0`)
 	return err
+}
+
+func (s *Store) ensureAggregationSchema() error {
+	if _, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS aggregation_configs (model_id TEXT PRIMARY KEY, config_json TEXT NOT NULL, updated_at TEXT NOT NULL)`); err != nil {
+		return err
+	}
+	for _, column := range []struct{ name, sql string }{
+		{"aggregation_source", `ALTER TABLE call_logs ADD COLUMN aggregation_source TEXT NOT NULL DEFAULT ''`},
+		{"agg_attempts", `ALTER TABLE call_logs ADD COLUMN agg_attempts TEXT NOT NULL DEFAULT ''`},
+	} {
+		has, err := s.hasColumn("call_logs", column.name)
+		if err != nil {
+			return err
+		}
+		if !has {
+			if _, err := s.db.Exec(column.sql); err != nil {
+				return err
+			}
+		}
+	}
+	_, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_call_logs_aggregation_source ON call_logs(aggregation_source)`)
+	return err
+}
+
+// migrateAggregationConfigKeys makes the existing model_id key unambiguous.
+// The column remains the primary key required by the original schema, but now
+// stores the public providerId/modelId route rather than a provider-local id.
+func (s *Store) migrateAggregationConfigKeys() error {
+	rows, err := s.db.Query(`SELECT model_id FROM aggregation_configs`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	var legacy []string
+	for rows.Next() {
+		var key string
+		if err := rows.Scan(&key); err != nil {
+			return err
+		}
+		legacy = append(legacy, key)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, key := range legacy {
+		var providerID, modelID string
+		err := s.db.QueryRow(`SELECT m.provider_id, m.id FROM models m JOIN providers p ON p.id = m.provider_id WHERE p.type = ? AND m.id = ?`, AggregationProviderType, key).Scan(&providerID, &modelID)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if _, err := s.db.Exec(`UPDATE aggregation_configs SET model_id = ? WHERE model_id = ?`, aggregationConfigKey(providerID, modelID), key); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // enableVolcengineCodingStreamUsage updates only the known Coding Plan
@@ -520,7 +585,9 @@ func (s *Store) ListProviders() ([]Provider, error) {
 }
 
 func (s *Store) CreateProvider(in ProviderInput) (Provider, error) {
-	in = withDefaultCapabilityConfig(in)
+	if in.Type != AggregationProviderType {
+		in = withDefaultCapabilityConfig(in)
+	}
 	if err := validateProvider(in); err != nil {
 		return Provider{}, err
 	}
@@ -540,7 +607,9 @@ func (s *Store) CreateProvider(in ProviderInput) (Provider, error) {
 }
 
 func (s *Store) UpdateProvider(in ProviderInput) (Provider, error) {
-	in = withDefaultCapabilityConfig(in)
+	if in.Type != AggregationProviderType {
+		in = withDefaultCapabilityConfig(in)
+	}
 	if err := validateProvider(in); err != nil {
 		return Provider{}, err
 	}
@@ -566,6 +635,9 @@ func (s *Store) DeleteProvider(id string) error {
 	id = strings.TrimSpace(id)
 	if id == "" {
 		return errors.New("provider id is required")
+	}
+	if _, err := s.db.Exec(`DELETE FROM aggregation_configs WHERE model_id IN (SELECT provider_id || '/' || id FROM models WHERE provider_id = ?)`, id); err != nil {
+		return err
 	}
 	if _, err := s.db.Exec(`DELETE FROM models WHERE provider_id = ?`, id); err != nil {
 		return err
@@ -595,7 +667,42 @@ func (s *Store) ListModels(providerID string) ([]Model, error) {
 		if err := rows.Scan(&m.ID, &m.ProviderID, &m.Name, &m.Capabilities, &m.ContextLength, &m.MaxTokens, &m.Enabled, &m.CreatedAt, &m.UpdatedAt); err != nil {
 			return nil, err
 		}
+		var providerType string
+		if err := s.db.QueryRow(`SELECT type FROM providers WHERE id = ?`, m.ProviderID).Scan(&providerType); err != nil {
+			return nil, err
+		}
+		if providerType == AggregationProviderType {
+			cfg, err := s.GetAggregationConfig(m.ProviderID, m.ID)
+			if err != nil {
+				return nil, err
+			}
+			m.Aggregation = &cfg
+		}
 		models = append(models, m)
+	}
+	return models, rows.Err()
+}
+
+// ListAggregationMemberModels returns only real models that may be selected as
+// aggregation members. It deliberately avoids reading aggregation_configs, so
+// a damaged aggregation draft cannot hide otherwise healthy member models.
+func (s *Store) ListAggregationMemberModels() ([]Model, error) {
+	rows, err := s.db.Query(`
+SELECT m.id, m.provider_id, m.name, m.capabilities, m.context_length, m.max_tokens, m.enabled, m.created_at, m.updated_at
+FROM models m JOIN providers p ON p.id = m.provider_id
+WHERE p.type != ?
+ORDER BY m.provider_id, m.name`, AggregationProviderType)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var models []Model
+	for rows.Next() {
+		var model Model
+		if err := rows.Scan(&model.ID, &model.ProviderID, &model.Name, &model.Capabilities, &model.ContextLength, &model.MaxTokens, &model.Enabled, &model.CreatedAt, &model.UpdatedAt); err != nil {
+			return nil, err
+		}
+		models = append(models, model)
 	}
 	return models, rows.Err()
 }
@@ -604,13 +711,41 @@ func (s *Store) CreateModel(in ModelInput) (Model, error) {
 	if err := validateModel(in); err != nil {
 		return Model{}, err
 	}
+	var providerType string
+	if err := s.db.QueryRow(`SELECT type FROM providers WHERE id = ?`, in.ProviderID).Scan(&providerType); err != nil {
+		return Model{}, err
+	}
+	if providerType == AggregationProviderType {
+		if in.Aggregation == nil {
+			return Model{}, errors.New("aggregation model configuration is required")
+		}
+		if err := s.validateAggregationConfig(*in.Aggregation); err != nil {
+			return Model{}, err
+		}
+		in.ContextLength, in.MaxTokens, in.Capabilities = 0, 0, ""
+	} else if in.Aggregation != nil {
+		return Model{}, errors.New("only aggregation providers accept aggregation configuration")
+	}
 	now := timestamp()
 	enabled := inputEnabled(in)
-	_, err := s.db.Exec(
+	tx, err := s.db.Begin()
+	if err != nil {
+		return Model{}, err
+	}
+	defer tx.Rollback()
+	_, err = tx.Exec(
 		`INSERT INTO models(id, provider_id, name, capabilities, context_length, max_tokens, enabled, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		in.ID, in.ProviderID, in.Name, in.Capabilities, in.ContextLength, in.MaxTokens, enabled, now, now,
 	)
 	if err != nil {
+		return Model{}, err
+	}
+	if in.Aggregation != nil {
+		if err := s.saveAggregationConfig(tx, in.ProviderID, in.ID, *in.Aggregation); err != nil {
+			return Model{}, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
 		return Model{}, err
 	}
 	return Model{ID: in.ID, ProviderID: in.ProviderID, Name: in.Name, Capabilities: in.Capabilities, ContextLength: in.ContextLength, MaxTokens: in.MaxTokens, Enabled: enabled, CreatedAt: now, UpdatedAt: now}, nil
@@ -620,9 +755,29 @@ func (s *Store) UpdateModel(in ModelInput) (Model, error) {
 	if err := validateModel(in); err != nil {
 		return Model{}, err
 	}
+	var providerType string
+	if err := s.db.QueryRow(`SELECT type FROM providers WHERE id = ?`, in.ProviderID).Scan(&providerType); err != nil {
+		return Model{}, err
+	}
+	if providerType == AggregationProviderType {
+		if in.Aggregation == nil {
+			return Model{}, errors.New("aggregation model configuration is required")
+		}
+		if err := s.validateAggregationConfig(*in.Aggregation); err != nil {
+			return Model{}, err
+		}
+		in.ContextLength, in.MaxTokens, in.Capabilities = 0, 0, ""
+	} else if in.Aggregation != nil {
+		return Model{}, errors.New("only aggregation providers accept aggregation configuration")
+	}
 	now := timestamp()
 	enabled := inputEnabled(in)
-	result, err := s.db.Exec(
+	tx, err := s.db.Begin()
+	if err != nil {
+		return Model{}, err
+	}
+	defer tx.Rollback()
+	result, err := tx.Exec(
 		`UPDATE models SET name = ?, capabilities = ?, context_length = ?, max_tokens = ?, enabled = ?, updated_at = ? WHERE provider_id = ? AND id = ?`,
 		in.Name, in.Capabilities, in.ContextLength, in.MaxTokens, enabled, now, in.ProviderID, in.ID,
 	)
@@ -631,6 +786,14 @@ func (s *Store) UpdateModel(in ModelInput) (Model, error) {
 	}
 	if rows, _ := result.RowsAffected(); rows == 0 {
 		return Model{}, sql.ErrNoRows
+	}
+	if in.Aggregation != nil {
+		if err := s.saveAggregationConfig(tx, in.ProviderID, in.ID, *in.Aggregation); err != nil {
+			return Model{}, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return Model{}, err
 	}
 	return Model{ID: in.ID, ProviderID: in.ProviderID, Name: in.Name, Capabilities: in.Capabilities, ContextLength: in.ContextLength, MaxTokens: in.MaxTokens, Enabled: enabled, UpdatedAt: now}, nil
 }
@@ -641,6 +804,7 @@ func (s *Store) DeleteModel(providerID, id string) error {
 	if providerID == "" || id == "" {
 		return errors.New("provider id and model id are required")
 	}
+	_, _ = s.db.Exec(`DELETE FROM aggregation_configs WHERE model_id = ?`, aggregationConfigKey(providerID, id))
 	_, err := s.db.Exec(`DELETE FROM models WHERE provider_id = ? AND id = ?`, providerID, id)
 	return err
 }
@@ -814,9 +978,9 @@ func (s *Store) CreateCallLogs(logs []CallLog) error {
 	}
 	var query strings.Builder
 	query.WriteString(`
-INSERT INTO call_logs(provider_id, model_id, app_name, protocol, started_at, ended_at, status_code, error, is_stream, input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens, token_estimated)
+INSERT INTO call_logs(provider_id, model_id, app_name, protocol, started_at, ended_at, status_code, error, is_stream, input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens, token_estimated, aggregation_source, agg_attempts)
 VALUES `)
-	args := make([]any, 0, len(logs)*14)
+	args := make([]any, 0, len(logs)*16)
 	for i, log := range logs {
 		if log.StartedAt == "" {
 			log.StartedAt = timestamp()
@@ -827,10 +991,10 @@ VALUES `)
 		if i > 0 {
 			query.WriteString(",")
 		}
-		query.WriteString("(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+		query.WriteString("(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
 		args = append(args,
 			nullable(log.ProviderID), nullable(log.ModelID), log.AppName, log.Protocol, log.StartedAt, nullable(log.EndedAt), log.StatusCode, nullable(log.Error), log.Stream,
-			log.InputTokens, log.OutputTokens, log.CacheCreationInputTokens, log.CacheReadInputTokens, log.TokenEstimated,
+			log.InputTokens, log.OutputTokens, log.CacheCreationInputTokens, log.CacheReadInputTokens, log.TokenEstimated, log.AggregationSource, log.AggAttempts,
 		)
 	}
 	_, err := s.db.Exec(query.String(), args...)
@@ -870,9 +1034,10 @@ ORDER BY substr(started_at, 1, 10)`, args...)
 
 func (s *Store) TokenStatModels(filter TokenStatsFilter) ([]string, error) {
 	filter = normalizeStatsFilter(TokenStatsFilter{
-		From:       filter.From,
-		To:         filter.To,
-		ProviderID: filter.ProviderID,
+		From:              filter.From,
+		To:                filter.To,
+		ProviderID:        filter.ProviderID,
+		AggregationSource: filter.AggregationSource,
 	})
 	where, args := statsWhere(filter)
 	if where == "" {
@@ -900,7 +1065,7 @@ ORDER BY model_id`, args...)
 }
 
 func (s *Store) TokenStatApps(filter TokenStatsFilter) ([]string, error) {
-	filter = normalizeStatsFilter(TokenStatsFilter{From: filter.From, To: filter.To, ProviderID: filter.ProviderID, ModelID: filter.ModelID})
+	filter = normalizeStatsFilter(TokenStatsFilter{From: filter.From, To: filter.To, ProviderID: filter.ProviderID, ModelID: filter.ModelID, AggregationSource: filter.AggregationSource})
 	where, args := statsWhere(filter)
 	rows, err := s.db.Query(`
 SELECT DISTINCT app_name
@@ -1011,7 +1176,7 @@ func (s *Store) CallLogs(filter TokenStatsFilter, page int, pageSize int) (CallL
 	rows, err := s.db.Query(`
 SELECT id, COALESCE(provider_id, ''), COALESCE(model_id, ''), app_name, protocol, started_at, COALESCE(ended_at, ''),
        COALESCE(status_code, 0), COALESCE(error, ''), is_stream, input_tokens, output_tokens,
-       cache_creation_input_tokens, cache_read_input_tokens, token_estimated
+       cache_creation_input_tokens, cache_read_input_tokens, token_estimated, aggregation_source, agg_attempts
 FROM call_logs`+where+`
 ORDER BY started_at DESC, id DESC
 LIMIT ? OFFSET ?`, append(args, pageSize, (page-1)*pageSize)...)
@@ -1021,7 +1186,7 @@ LIMIT ? OFFSET ?`, append(args, pageSize, (page-1)*pageSize)...)
 	defer rows.Close()
 	for rows.Next() {
 		var log CallLog
-		if err := rows.Scan(&log.ID, &log.ProviderID, &log.ModelID, &log.AppName, &log.Protocol, &log.StartedAt, &log.EndedAt, &log.StatusCode, &log.Error, &log.Stream, &log.InputTokens, &log.OutputTokens, &log.CacheCreationInputTokens, &log.CacheReadInputTokens, &log.TokenEstimated); err != nil {
+		if err := rows.Scan(&log.ID, &log.ProviderID, &log.ModelID, &log.AppName, &log.Protocol, &log.StartedAt, &log.EndedAt, &log.StatusCode, &log.Error, &log.Stream, &log.InputTokens, &log.OutputTokens, &log.CacheCreationInputTokens, &log.CacheReadInputTokens, &log.TokenEstimated, &log.AggregationSource, &log.AggAttempts); err != nil {
 			return CallLogPage{}, err
 		}
 		log.DurationMs = durationMs(log.StartedAt, log.EndedAt)
@@ -1063,6 +1228,10 @@ func statsWhere(filter TokenStatsFilter) (string, []any) {
 		clauses = append(clauses, "app_name = ?")
 		args = append(args, filter.AppName)
 	}
+	if strings.TrimSpace(filter.AggregationSource) != "" {
+		clauses = append(clauses, "aggregation_source = ?")
+		args = append(args, filter.AggregationSource)
+	}
 	if len(clauses) == 0 {
 		return "", nil
 	}
@@ -1077,6 +1246,8 @@ func statGroupColumn(groupBy string) (string, string, error) {
 		return "model_id", "未知模型", nil
 	case "app":
 		return "app_name", NoAppName, nil
+	case "aggregation":
+		return "aggregation_source", "直接调用", nil
 	default:
 		return "", "", errors.New("unsupported stat group")
 	}
@@ -1129,6 +1300,12 @@ func validateProvider(in ProviderInput) error {
 	}
 	if strings.TrimSpace(in.Type) == "" {
 		return errors.New("provider type is required")
+	}
+	if in.Type == AggregationProviderType {
+		if strings.TrimSpace(in.BaseURL) != "" || strings.TrimSpace(in.APIKey) != "" || strings.TrimSpace(in.CapabilityConfig) != "" {
+			return errors.New("aggregation provider cannot have baseUrl, apiKey, or capabilityConfig")
+		}
+		return nil
 	}
 	if strings.TrimSpace(in.BaseURL) == "" {
 		return errors.New("provider baseUrl is required")

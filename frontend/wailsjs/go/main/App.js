@@ -62,6 +62,10 @@ export function ListAPIKeys() {
   return window['go']['main']['App']['ListAPIKeys']();
 }
 
+export function ListAggregationMemberModels() {
+  return window['go']['main']['App']['ListAggregationMemberModels']();
+}
+
 export function ListModels(arg1) {
   return window['go']['main']['App']['ListModels'](arg1);
 }

@@ -6,6 +6,7 @@
 
 - **多供应商统一管理**：在界面中添加、编辑、删除多个 LLM 供应商及其模型，内置 DeepSeek、火山引擎 Coding Plan、Opencode GO、硅基流动、Anthropic、Google Gemini、OpenAI Responses 等常用预设，一键导入。
 - **统一模型路由**：对外以 `供应商ID/模型ID` 形式路由到具体模型，可自由设置对外提供的模型范围。
+- **聚合路由**：可创建无上游凭据的聚合 Provider，并以主备、轮询、按 Token 均衡或分时策略路由到真实成员模型；主备在连接、超时、HTTP/解析失败时会在首个 SSE 事件前切换备成员。
 - **多协议出站适配**：对上游支持 OpenAI Chat、Anthropic Messages、Google Gemini、OpenAI Responses 四种协议，按各供应商实际接口自动转换。
 - **OpenAI Chat 入站**：对外暴露 OpenAI Chat Completions 兼容接口（`/v1/chat/completions`、`/v1/models`），支持流式与非流式。
 - **流式转发**：完整支持流式输出链路，工具调用与思考内容在流式场景下可正确传递。
@@ -91,6 +92,10 @@ build/               Wails 打包配置（Windows NSIS、macOS plist）
 docs/                设计文档（ir.md）
 .github/workflows/   GitHub Actions 发布流水线
 ```
+
+## 聚合路由说明
+
+聚合模型的成员必须是已存在的真实模型，不能嵌套聚合模型。主备策略使用内存冷却期跳过刚失败的成员（默认 60 秒），并默认限制每次成员尝试为 10 秒；应用重启后这两类运行态会清零。为了容灾，主备切换采用 at-least-once 语义：如果上游已接收请求但连接在响应前失败，备成员可能收到同一请求一次。成功调用的 `model` 会返回实际成员的 `providerId/modelId`，日志和 Token 统计也归属实际成员，同时保留聚合来源以便筛选追踪。
 
 ## 技术栈
 

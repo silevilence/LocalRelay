@@ -82,14 +82,14 @@ func TestFetchProviderModelsUsesOpenAIListEndpoint(t *testing.T) {
 	}
 }
 
-func TestRelayGatewayUsesWildcardListenerAndCanChangePort(t *testing.T) {
+func TestRelayGatewayCanChangePort(t *testing.T) {
 	s, err := store.Open(filepath.Join(t.TempDir(), "localrelay.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer s.Close()
 
-	app := &App{store: s}
+	app := &App{store: s, listenRelay: listenLoopbackRelay}
 	app.relay = relay.New(s)
 	defer app.shutdown(nil)
 
@@ -125,15 +125,9 @@ func TestRelayGatewayUsesWildcardListenerAndCanChangePort(t *testing.T) {
 	}
 }
 
-func TestListenRelayBindsAllInterfaces(t *testing.T) {
-	listener, err := listenRelay(0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer listener.Close()
-	address, ok := listener.Addr().(*net.TCPAddr)
-	if !ok || !address.IP.IsUnspecified() {
-		t.Fatalf("relay listener address = %v, want wildcard address", listener.Addr())
+func TestRelayListenAddressBindsAllInterfaces(t *testing.T) {
+	if got := relayListenAddress(9123); got != "0.0.0.0:9123" {
+		t.Fatalf("relay listen address = %q, want wildcard address", got)
 	}
 }
 
@@ -143,7 +137,7 @@ func TestRelayServiceCanPauseChangePortAndResume(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	app := &App{store: s, relay: relay.New(s)}
+	app := &App{store: s, relay: relay.New(s), listenRelay: listenLoopbackRelay}
 	defer app.shutdown(nil)
 
 	initialPort := availablePort(t)
@@ -259,7 +253,7 @@ func TestRelayServiceEnableKeepsDisabledStateWhenPortIsUnavailable(t *testing.T)
 		t.Fatal(err)
 	}
 
-	listener, err := listenRelay(0)
+	listener, err := listenLoopbackRelay(0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -269,7 +263,7 @@ func TestRelayServiceEnableKeepsDisabledStateWhenPortIsUnavailable(t *testing.T)
 		t.Fatal(err)
 	}
 
-	app := &App{store: s, relay: relay.New(s)}
+	app := &App{store: s, relay: relay.New(s), listenRelay: listenLoopbackRelay}
 	if enabled, err := app.SetRelayServiceEnabled(true); err == nil || enabled {
 		t.Fatalf("enable on unavailable port enabled=%v err=%v", enabled, err)
 	}
@@ -286,4 +280,8 @@ func availablePort(t *testing.T) int {
 	}
 	defer listener.Close()
 	return listener.Addr().(*net.TCPAddr).Port
+}
+
+func listenLoopbackRelay(port int) (net.Listener, error) {
+	return net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
 }

@@ -15,6 +15,7 @@ import {
 	DesktopSettings,
 	LocalAccessAddresses,
     ListModels,
+	ListAggregationMemberModels,
     ListProviderPresets,
     ListProviders,
     RelayBaseURL,
@@ -39,7 +40,7 @@ import {
 import {EventsOn} from "../wailsjs/runtime/runtime";
 
 const emptyProvider = {id: "", name: "", type: "openai", baseUrl: "", apiKey: "", capabilityConfig: ""};
-const emptyModel = {id: "", providerId: "", name: "", capabilities: "", contextLength: 0, maxTokens: 0, enabled: true};
+const emptyModel = {id: "", providerId: "", name: "", capabilities: "", contextLength: 0, maxTokens: 0, enabled: true, aggregation: null};
 const emptyApiKey = {id: 0, name: "", description: ""};
 const thinkingRequestFieldOptions = ["thinking", "enable_thinking", "thinking_budget"];
 const reasoningValueOptions = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
@@ -59,6 +60,7 @@ const providerTypeOptions = [
     ["anthropic", "Anthropic"],
     ["gemini", "Google Gemini"],
     ["openai-responses", "OpenAI Responses"],
+    ["aggregation", "聚合"],
 ];
 const skippedUpdateKey = "localrelay.skippedUpdateVersion";
 
@@ -66,6 +68,7 @@ function App() {
     const [providers, setProviders] = useState([]);
     const [providerPresets, setProviderPresets] = useState([]);
     const [models, setModels] = useState([]);
+	const [allModels, setAllModels] = useState([]);
     const [apiKeys, setApiKeys] = useState([]);
     const [apiKeyDraft, setApiKeyDraft] = useState(emptyApiKey);
     const [editingApiKey, setEditingApiKey] = useState(false);
@@ -100,7 +103,7 @@ function App() {
 	const [desktopSettings, setDesktopSettings] = useState({gatewayEnabled: true, hideOnMinimize: true, hideOnClose: true, launchAtLogin: false, startMinimized: true});
 	const [localAddresses, setLocalAddresses] = useState([]);
 	const [savingDesktopSetting, setSavingDesktopSetting] = useState("");
-    const [statsFilter, setStatsFilter] = useState({from: daysAgo(7), to: today(), providerId: "", modelId: "", appName: ""});
+    const [statsFilter, setStatsFilter] = useState({from: daysAgo(7), to: today(), providerId: "", modelId: "", appName: "", aggregationSource: ""});
     const [statsModelOptions, setStatsModelOptions] = useState([]);
     const [statsAppOptions, setStatsAppOptions] = useState([]);
     const [stats, setStats] = useState({points: [], calls: 0, estimatedCalls: 0, inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0});
@@ -225,6 +228,15 @@ function App() {
         }
     }
 
+    async function refreshAllModels() {
+		try {
+			setAllModels((await ListAggregationMemberModels()) || []);
+		} catch (error) {
+			setAllModels([]);
+			setMessage(`加载可选聚合成员失败：${error}`);
+		}
+	}
+
     async function refreshAPIKeys() {
         try {
             setApiKeys((await ListAPIKeys()) || []);
@@ -275,12 +287,12 @@ function App() {
 
     async function saveProvider(event) {
         event.preventDefault();
-        if (!providerDraft.id || !providerDraft.name || !providerDraft.type || !providerDraft.baseUrl) {
+        if (!providerDraft.id || !providerDraft.name || !providerDraft.type || (providerDraft.type !== "aggregation" && !providerDraft.baseUrl)) {
             setMessage("平台 ID、名称、供应商分类和 API 地址必填。");
             return;
         }
         const preset = providerPresets.find((item) => item.id === selectedPresetId);
-        const payload = {...providerDraft, capabilityConfig: providerDraft.capabilityConfig || preset?.capabilityConfig || ""};
+        const payload = providerDraft.type === "aggregation" ? {...providerDraft, baseUrl: "", apiKey: "", capabilityConfig: ""} : {...providerDraft, capabilityConfig: providerDraft.capabilityConfig || preset?.capabilityConfig || ""};
         try {
             if (isAddingProvider) {
                 await CreateProvider(payload);
@@ -352,7 +364,13 @@ function App() {
     }
 
     async function removeModel(model) {
-        if (!confirm(`删除模型「${model.id}」？`)) return;
+		let warning = "";
+		try {
+			const all = await ListModels("");
+			const refs = (all || []).filter((candidate) => candidate.aggregation?.members?.some((member) => member.providerId === model.providerId && member.modelId === model.id));
+			if (refs.length) warning = `\n它仍被聚合模型 ${refs.map((item) => `${item.providerId}/${item.id}`).join("、")} 引用；运行时会静默跳过这个失效成员。`;
+		} catch { /* deletion remains available when the advisory lookup fails */ }
+        if (!confirm(`删除模型「${model.id}」？${warning}`)) return;
         try {
             await DeleteModel(model.providerId, model.id);
             await refreshModels(selectedProviderId);
@@ -394,6 +412,7 @@ function App() {
             return;
         }
         setModelDraft({...emptyModel, providerId: selectedProviderId});
+		refreshAllModels();
         setEditingModel(false);
         setShowModelForm(true);
     }
@@ -442,7 +461,8 @@ function App() {
     }
 
     function editModel(model) {
-        setModelDraft({...model, enabled: model.enabled !== false});
+		setModelDraft({...model, enabled: model.enabled !== false});
+		refreshAllModels();
         setEditingModel(true);
         setShowModelForm(true);
     }
@@ -482,16 +502,17 @@ function App() {
     async function refreshStats() {
         const filter = statsFilterPayload(statsFilter);
         try {
-            const [summary, providersRows, modelsRows, appsRows, trend, logs] = await Promise.all([
+            const [summary, providersRows, modelsRows, appsRows, aggregationRows, trend, logs] = await Promise.all([
                 TokenStats(filter),
                 TokenStatRows(filter, "provider"),
                 TokenStatRows(filter, "model"),
                 TokenStatRows(filter, "app"),
+				TokenStatRows(filter, "aggregation"),
                 TokenTrend(filter, statsGrain, statsStackBy),
                 CallLogs(filter, logPageNum, 50),
             ]);
             setStats(summary || {points: []});
-            setStatRows({provider: providersRows || [], model: modelsRows || [], app: appsRows || []});
+			setStatRows({provider: providersRows || [], model: modelsRows || [], app: appsRows || [], aggregation: aggregationRows || []});
             setTrendRows(trend || []);
             setLogPage(logs || {items: [], total: 0});
         } catch (error) {
@@ -768,6 +789,7 @@ function App() {
                                 >
                                     <Avatar name={provider.name || provider.id} />
                                     <span className="min-w-0 flex-1 truncate text-base font-semibold text-zinc-200">{provider.name}</span>
+									{provider.type === "aggregation" && <span className="rounded-full border border-sky-700/60 bg-sky-950/70 px-2 py-0.5 text-xs font-bold text-sky-300">聚合</span>}
                                     <span className="rounded-full border border-green-700/60 bg-green-950/70 px-2 py-0.5 text-xs font-bold text-green-400">ON</span>
                                 </button>
                             ))}
@@ -833,10 +855,10 @@ function App() {
                                                     <button
                                                         className="px-4 py-2 font-semibold text-zinc-100 hover:bg-zinc-900 disabled:cursor-wait disabled:opacity-60"
                                                         type="button"
-                                                        disabled={fetchingModels}
+								disabled={fetchingModels || activeProvider?.type === "aggregation"}
                                                         onClick={fetchProviderModels}
                                                     >
-                                                        {fetchingModels ? "正在获取…" : "⟳ 获取模型列表"}
+								{activeProvider?.type === "aggregation" ? "聚合容器" : fetchingModels ? "正在获取…" : "⟳ 获取模型列表"}
                                                     </button>
                                                     <button className="border-l border-zinc-700 px-4 py-2 text-xl hover:bg-zinc-900" type="button" onClick={startAddModel}>＋</button>
                                                 </div>
@@ -875,6 +897,9 @@ function App() {
                     <ModelForm
                         draft={modelDraft}
                         editing={editingModel}
+						isAggregation={selectedProvider?.type === "aggregation"}
+						allModels={allModels}
+						providers={providers}
                         onChange={(patch) => setModelDraft({...modelDraft, ...patch})}
                         onSubmit={saveModel}
                         onCancel={() => {
@@ -964,6 +989,7 @@ function ProviderPanel({
 }) {
     const selectedPreset = presets.find((preset) => preset.id === selectedPresetId);
     const typeOptions = providerTypeOptionsWithCurrent(presets, draft.type);
+	const isAggregation = draft.type === "aggregation";
     return (
         <form className="space-y-7" onSubmit={onSubmit}>
             {isAdding && presets.length > 0 && (
@@ -1035,7 +1061,7 @@ function ProviderPanel({
                 </div>
             )}
 
-            <div>
+            {!isAggregation && <div>
                 <div className="mb-3 flex items-center justify-between">
                     <h2 className="text-xl font-bold">API 密钥</h2>
                     <span className="text-sm text-zinc-500">本地加密存储</span>
@@ -1054,9 +1080,9 @@ function ProviderPanel({
                     <button className="border-l border-zinc-700 px-5 font-bold hover:bg-zinc-900" type="button" onClick={onTest}>检测</button>
                 </div>
                 <p className="mt-2 text-right text-sm text-zinc-500">多个密钥使用逗号分隔</p>
-            </div>
+            </div>}
 
-            <div>
+            {!isAggregation && <div>
                 <div className="mb-3 flex items-center justify-between">
                     <h2 className="text-xl font-bold">API 地址</h2>
                     <span className="text-sm text-zinc-500">OpenAI 兼容入口通常以 /v1 结尾</span>
@@ -1068,9 +1094,10 @@ function ProviderPanel({
                     placeholder="https://api.openai.com/v1"
                 />
                 <p className="mt-2 text-sm text-zinc-500">预览：{previewProviderUrl(draft.baseUrl, draft.capabilityConfig)}</p>
-            </div>
+            </div>}
 
-            <ProviderCapabilityEditor value={draft.capabilityConfig} onChange={(capabilityConfig) => onChange({capabilityConfig})} />
+
+			{isAggregation ? <div className="rounded-2xl border border-sky-800/60 bg-sky-950/25 p-4 text-sm text-sky-100"><div className="font-bold">聚合容器</div><p className="mt-1 text-sky-200/70">聚合 Provider 不连接上游；请在下方添加聚合模型并配置成员和策略。</p></div> : <ProviderCapabilityEditor value={draft.capabilityConfig} onChange={(capabilityConfig) => onChange({capabilityConfig})} />}
 
             <div className="flex gap-3">
                 <button className="rounded-xl bg-zinc-100 px-5 py-2.5 font-bold text-zinc-950 hover:bg-white" type="submit">
@@ -1086,7 +1113,28 @@ function ProviderPanel({
     );
 }
 
-function ModelForm({draft, editing, onChange, onSubmit, onCancel}) {
+function ModelForm({draft, editing, isAggregation, allModels, providers, onChange, onSubmit, onCancel}) {
+	const aggregation = draft.aggregation || {members: [], strategy: {type: "primary_backup", cooldownSeconds: 60, attemptTimeoutSeconds: 10, schedule: []}};
+	const members = aggregation.members || [];
+	const aggregationProviderIDs = new Set((providers || []).filter((provider) => provider.type === "aggregation").map((provider) => provider.id));
+	const eligible = (allModels || []).filter((model) => model.providerId !== draft.providerId && !aggregationProviderIDs.has(model.providerId));
+	const intersection = aggregationIntersection(members, allModels);
+	const updateAggregation = (patch) => onChange({aggregation: {...aggregation, ...patch}});
+	const addMember = (value) => { if (!value) return; const [providerId, modelId] = JSON.parse(value); if (!members.some((item) => item.providerId === providerId && item.modelId === modelId)) updateAggregation({members: [...members, {providerId, modelId}]}); };
+	const move = (index, direction) => { const next = [...members]; const target = index + direction; if (target < 0 || target >= next.length) return; [next[index], next[target]] = [next[target], next[index]]; updateAggregation({members: next}); };
+	if (isAggregation) return (
+		<form className="space-y-5" onSubmit={onSubmit}>
+			<div className="grid gap-3 md:grid-cols-2"><Field label="聚合模型 ID" value={draft.id} disabled={editing} onChange={(id) => onChange({id})} placeholder="balanced-route" /><Field label="显示名称" value={draft.name} onChange={(name) => onChange({name})} placeholder="生产聚合路由" /></div>
+			<section className="rounded-2xl border border-sky-900/70 bg-sky-950/20 p-4"><h3 className="font-bold text-sky-100">有序成员</h3><p className="mt-1 text-xs text-sky-200/60">仅真实模型可选。优先级容灾时第一项优先；其他策略也以此列表作为候选集合。</p>
+				<div className="mt-3 space-y-2">{members.map((member, index) => <div key={`${member.providerId}/${member.modelId}`} className="flex items-center gap-2 rounded-xl border border-zinc-800 bg-[#151515] px-3 py-2"><code className="min-w-0 flex-1 truncate text-sm text-zinc-200">{member.providerId}/{member.modelId}</code><button type="button" className="rounded border border-zinc-700 px-2" onClick={() => move(index, -1)}>↑</button><button type="button" className="rounded border border-zinc-700 px-2" onClick={() => move(index, 1)}>↓</button><button type="button" className="rounded border border-red-900 px-2 text-red-300" onClick={() => updateAggregation({members: members.filter((_, itemIndex) => itemIndex !== index)})}>删除</button></div>)}</div>
+				<SelectField label="添加真实模型" value="" onChange={addMember} options={[["", eligible.length ? "选择成员…" : "暂无可选真实模型"], ...eligible.map((model) => [JSON.stringify([model.providerId, model.id]), `${model.name || model.id} (${model.providerId}/${model.id})`])]} />
+			</section>
+			<section className="rounded-2xl border border-zinc-800 bg-zinc-950/30 p-4"><h3 className="font-bold">转发策略</h3><div className="mt-3 grid gap-3 md:grid-cols-2"><SelectField label="策略" value={aggregation.strategy?.type || "primary_backup"} onChange={(type) => updateAggregation({strategy: {...aggregation.strategy, type}})} options={[["primary_backup", "优先级容灾"], ["round_robin", "轮询"], ["token_balance", "按 Token 均衡"], ["time_schedule", "分时使用"]]} />{aggregation.strategy?.type === "primary_backup" && <><Field label="冷却期（秒）" type="number" value={aggregation.strategy?.cooldownSeconds || 60} onChange={(cooldownSeconds) => updateAggregation({strategy: {...aggregation.strategy, cooldownSeconds: Number(cooldownSeconds) || 60}})} /><Field label="单成员超时（秒）" type="number" value={aggregation.strategy?.attemptTimeoutSeconds || 10} onChange={(attemptTimeoutSeconds) => updateAggregation({strategy: {...aggregation.strategy, attemptTimeoutSeconds: Number(attemptTimeoutSeconds) || 10}})} /></>}</div><StrategyHelp active={aggregation.strategy?.type || "primary_backup"} />{aggregation.strategy?.type === "time_schedule" && <ScheduleEditor members={members} entries={aggregation.strategy?.schedule || []} onChange={(schedule) => updateAggregation({strategy: {...aggregation.strategy, schedule}})} />}</section>
+			<div className="rounded-xl border border-zinc-800 bg-black/20 px-4 py-3 text-xs text-zinc-400">能力交集（仅预览）：context {intersection.contextLength} · max {intersection.maxTokens} · {intersection.capabilities.length ? intersection.capabilities.join("、") : "无共同能力"}。请求参数不会在聚合层修改。</div>
+			<label className="flex items-center gap-2 text-sm font-semibold text-zinc-300"><input type="checkbox" checked={draft.enabled !== false} onChange={(event) => onChange({enabled: event.target.checked})} />对外提供</label>
+			<div className="flex justify-end gap-2 border-t border-zinc-800 pt-4"><button className="rounded-xl border border-zinc-700 px-4 py-2 font-bold text-zinc-300" type="button" onClick={onCancel}>取消</button><button className="rounded-xl bg-zinc-100 px-4 py-2 font-bold text-zinc-950" type="submit">{editing ? "更新" : "添加"}</button></div>
+		</form>
+	);
     return (
         <form className="space-y-5" onSubmit={onSubmit}>
             <div className="grid gap-3 md:grid-cols-2">
@@ -1109,6 +1157,29 @@ function ModelForm({draft, editing, onChange, onSubmit, onCancel}) {
             </div>
         </form>
     );
+}
+
+function ScheduleEditor({members, entries, onChange}) {
+	const update = (index, patch) => onChange(entries.map((entry, itemIndex) => itemIndex === index ? {...entry, ...patch} : entry));
+	return <div className="mt-4 space-y-2"><div className="text-sm font-semibold text-zinc-300">小时例外表（未配置时使用首成员）</div>{entries.map((entry, index) => <div key={index} className="flex gap-2"><select className="rounded-xl border border-zinc-700 bg-[#151515] px-3 py-2" value={entry.hour} onChange={(event) => update(index, {hour:Number(event.target.value)})}>{Array.from({length:24}, (_, hour) => <option key={hour} value={hour}>{hour}:00</option>)}</select><select className="min-w-0 flex-1 rounded-xl border border-zinc-700 bg-[#151515] px-3 py-2" value={JSON.stringify([entry.member?.providerId || "", entry.member?.modelId || ""])} onChange={(event) => { const [providerId, modelId] = JSON.parse(event.target.value); update(index, {member:{providerId, modelId}}); }}>{members.map((member) => <option key={`${member.providerId}/${member.modelId}`} value={JSON.stringify([member.providerId, member.modelId])}>{member.providerId}/{member.modelId}</option>)}</select><button type="button" className="rounded-xl border border-red-900 px-3 text-red-300" onClick={() => onChange(entries.filter((_, itemIndex) => itemIndex !== index))}>删除</button></div>)}<button type="button" className="rounded-xl border border-zinc-700 px-3 py-2 text-sm" disabled={!members.length} onClick={() => onChange([...entries, {hour:0, member:members[0]}])}>＋ 添加时段</button></div>;
+}
+
+function StrategyHelp({active}) {
+	const items = [
+		["primary_backup", "优先级容灾", "按成员顺序尝试；失败会切换下一项，并在冷却期内跳过失败成员。"],
+		["round_robin", "轮询", "每次依序分配给下一个成员；失败不会改投其他成员。"],
+		["token_balance", "按 Token 均衡", "优先选择最近一小时累计消耗 Token 最少的成员；不做在途计数。"],
+		["time_schedule", "分时使用", "按当前小时选择例外表中的成员；未配置时使用列表第一项。"],
+	];
+	return <div className="mt-4 grid gap-2 sm:grid-cols-2">{items.map(([id, name, detail]) => <div key={id} className={`rounded-xl border px-3 py-2 text-xs ${active === id ? "border-sky-700 bg-sky-950/30 text-sky-100" : "border-zinc-800 text-zinc-500"}`}><div className="font-bold">{name}</div><p className="mt-1 leading-5">{detail}</p></div>)}</div>;
+}
+
+function aggregationIntersection(members, models) {
+	const selected = (members || []).map((member) => (models || []).find((model) => model.providerId === member.providerId && model.id === member.modelId)).filter(Boolean);
+	if (!selected.length) return {contextLength: 0, maxTokens: 0, capabilities: []};
+	let common = parseJsonObject(selected[0].capabilities, {});
+	for (const model of selected.slice(1)) { const next = parseJsonObject(model.capabilities, {}); common = Object.fromEntries(Object.entries(common).filter(([key, value]) => value === true && next[key] === true)); }
+	return {contextLength: Math.min(...selected.map((model) => Number(model.contextLength) || 0)), maxTokens: Math.min(...selected.map((model) => Number(model.maxTokens) || 0)), capabilities: Object.keys(common).filter((key) => common[key] === true)};
 }
 
 function ModelPicker({models, existingIds, selectedIds, adding, onToggle, onSelectNew, onClear, onConfirm}) {
@@ -1474,6 +1545,7 @@ function StatsPanel({baseUrl, stats, statRows, trendRows, logPage, logPageNum, t
                         onChange={(appName) => onChange({appName})}
                         options={[["", appOptions.length ? "全部" : "暂无记录"], ...appOptions.map((app) => [app, app])]}
                     />
+					<Field label="聚合来源" value={filter.aggregationSource || ""} onChange={(aggregationSource) => onChange({aggregationSource})} placeholder="agg/route" />
                     <button className="rounded-xl bg-zinc-100 px-4 py-2.5 font-bold text-zinc-950" type="button" onClick={onRefresh}>刷新</button>
                 </div>
             </div>
@@ -1513,7 +1585,7 @@ function StatsPanel({baseUrl, stats, statRows, trendRows, logPage, logPageNum, t
                         {(chart === "bar" || chart === "line") && (
                             <>
                                 <SelectField label="粒度" value={grain} onChange={onGrain} options={[["hour", "小时"], ["day", "天"], ["week", "周"]]} />
-                                <SelectField label="分组" value={stackBy} onChange={onStackBy} options={[["app", "应用"], ["model", "模型"], ["provider", "平台"]]} />
+                                <SelectField label="分组" value={stackBy} onChange={onStackBy} options={[["app", "应用"], ["model", "模型"], ["provider", "平台"], ["aggregation", "聚合来源"]]} />
                                 {chart === "line" && <SelectField label="指标" value={metric} onChange={onMetric} options={[["total", "总量"], ["input", "输入"], ["output", "输出"], ["cacheRead", "缓存命中"]]} />}
                             </>
                         )}
@@ -1529,6 +1601,7 @@ function StatsPanel({baseUrl, stats, statRows, trendRows, logPage, logPageNum, t
                         <TabButton active={table === "provider"} onClick={() => onTable("provider")}>按平台</TabButton>
                         <TabButton active={table === "model"} onClick={() => onTable("model")}>按模型</TabButton>
                         <TabButton active={table === "app"} onClick={() => onTable("app")}>按应用</TabButton>
+						<TabButton active={table === "aggregation"} onClick={() => onTable("aggregation")}>按聚合</TabButton>
                     </div>
                     {table === "logs" && <button className="rounded-xl border border-zinc-700 px-3 py-2 text-sm font-semibold text-zinc-300 hover:bg-zinc-900" type="button" onClick={() => exportFilteredLogs(filter)}>导出 CSV</button>}
                 </div>
@@ -1587,7 +1660,7 @@ function CallLogTable({items}) {
             <table className="w-full min-w-[1180px] text-left text-sm">
                 <thead className="bg-zinc-900/70 text-xs text-zinc-500">
                     <tr>
-                        {["调用时间", "提供商", "模型", "应用", "输入", "输出", "来源", "缓存命中", "状态码", "协议", "耗时ms", "流式", "错误信息"].map((label) => <th key={label} className="px-3 py-3">{label}</th>)}
+						{["调用时间", "提供商", "模型", "聚合来源", "应用", "输入", "输出", "来源", "缓存命中", "状态码", "协议", "耗时ms", "流式", "错误信息"].map((label) => <th key={label} className="px-3 py-3">{label}</th>)}
                     </tr>
                 </thead>
                 <tbody className="divide-y divide-zinc-800">
@@ -1596,6 +1669,7 @@ function CallLogTable({items}) {
                             <td className="px-3 py-3 text-zinc-300">{formatTime(item.startedAt)}</td>
                             <td className="px-3 py-3 text-zinc-400">{item.providerId || "—"}</td>
                             <td className="px-3 py-3 text-zinc-400">{item.modelId || "—"}</td>
+							<td className="px-3 py-3 text-sky-300">{item.aggregationSource || "—"}</td>
                             <td className="px-3 py-3 text-zinc-300">{item.appName || "无应用"}</td>
                             <td className="px-3 py-3">{fmt(item.inputTokens)}</td>
                             <td className="px-3 py-3">{fmt(item.outputTokens)}</td>
@@ -1608,7 +1682,7 @@ function CallLogTable({items}) {
                             <td className="max-w-[280px] truncate px-3 py-3 text-red-300" title={item.error}>{item.error || "—"}</td>
                         </tr>
                     ))}
-                    {!items.length && <tr><td className="px-4 py-8 text-center text-zinc-500" colSpan="13">暂无调用日志。</td></tr>}
+					{!items.length && <tr><td className="px-4 py-8 text-center text-zinc-500" colSpan="14">暂无调用日志。</td></tr>}
                 </tbody>
             </table>
         </div>
@@ -1747,6 +1821,7 @@ function statsFilterPayload(filter) {
         providerId: filter.providerId || "",
         modelId: filter.modelId || "",
         appName: filter.appName || "",
+		aggregationSource: filter.aggregationSource || "",
     };
 }
 
@@ -1780,11 +1855,12 @@ async function exportFilteredLogs(filter) {
 }
 
 function exportLogsCSV(items) {
-    const headers = ["调用时间", "提供商", "模型", "应用", "输入", "输出", "Token 来源", "缓存命中", "状态码", "协议", "耗时ms", "是否流式", "错误信息"];
+    const headers = ["调用时间", "提供商", "模型", "聚合来源", "应用", "输入", "输出", "Token 来源", "缓存命中", "状态码", "协议", "耗时ms", "是否流式", "错误信息"];
     const rows = items.map((item) => [
         item.startedAt,
         item.providerId,
         item.modelId,
+		item.aggregationSource || "",
         item.appName || "无应用",
         item.inputTokens,
         item.outputTokens,

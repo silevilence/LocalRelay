@@ -26,21 +26,23 @@ import (
 const statusClientClosedRequest = 499
 
 type Server struct {
-	store   *store.Store
-	client  *http.Client
-	logs    chan store.CallLog
-	logDone chan struct{}
-	logMu   sync.RWMutex
-	closed  bool
-	once    sync.Once
+	store       *store.Store
+	client      *http.Client
+	logs        chan store.CallLog
+	logDone     chan struct{}
+	logMu       sync.RWMutex
+	closed      bool
+	once        sync.Once
+	aggregation *aggregationRuntime
 }
 
 func New(s *store.Store) *Server {
 	server := &Server{
-		store:   s,
-		client:  &http.Client{Timeout: 2 * time.Minute},
-		logs:    make(chan store.CallLog, 1024),
-		logDone: make(chan struct{}),
+		store:       s,
+		client:      &http.Client{Timeout: 2 * time.Minute},
+		logs:        make(chan store.CallLog, 1024),
+		logDone:     make(chan struct{}),
+		aggregation: newAggregationRuntime(),
 	}
 	go server.writeLogs()
 	return server
@@ -196,6 +198,17 @@ func (s *Server) handleClientRequest(w http.ResponseWriter, r *http.Request, pro
 		writeError(w, status, routeCode(err), err.Error())
 		return
 	}
+	if routed.Provider.Type == store.AggregationProviderType {
+		result := s.forwardAggregation(r.Context(), w, routed, incoming, responseWriter, streamWriter, &log)
+		status = result.status
+		if result.err != nil {
+			log.Error = result.err.Error()
+			if !result.wrote {
+				writeError(w, status, "aggregation_error", result.err.Error())
+			}
+		}
+		return
+	}
 	log.ProviderID, log.ModelID = routed.Provider.ID, routed.Model.ID
 	providerCapabilities, err := capabilities.Parse(routed.Provider.CapabilityConfig)
 	if err != nil {
@@ -296,19 +309,23 @@ func (s *Server) handleClientRequest(w http.ResponseWriter, r *http.Request, pro
 }
 
 func (s *Server) streamNativeProviderResponse(ctx context.Context, w http.ResponseWriter, body io.Reader, cfg capabilities.Provider, model string, request ir.Request, log *store.CallLog, newWriter clientStreamWriter) error {
+	_, err := s.streamNativeGatedProviderResponse(ctx, w, body, cfg, model, request, log, newWriter)
+	return err
+}
+
+// streamNativeGatedProviderResponse delays HTTP headers until the first parsed
+// upstream SSE event. This lets aggregation primary-backup safely fail over on
+// a connection/status/parser failure before any bytes reach the client.
+func (s *Server) streamNativeGatedProviderResponse(ctx context.Context, w http.ResponseWriter, body io.Reader, cfg capabilities.Provider, model string, request ir.Request, log *store.CallLog, newWriter clientStreamWriter) (bool, error) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
-		return errors.New("streaming is not supported by response writer")
+		return false, errors.New("streaming is not supported by response writer")
 	}
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("X-Accel-Buffering", "no")
-	w.WriteHeader(http.StatusOK)
-	flusher.Flush()
-	writer := newWriter(w, cfg)
+	buffer := &bytes.Buffer{}
+	sink := &switchWriter{target: buffer}
+	writer := newWriter(sink, cfg)
 	var output strings.Builder
-	hasUsage := false
-	hasStreamError := false
+	hasUsage, hasStreamError, started := false, false, false
 	err := forEachProviderStreamEvent(body, cfg, func(event ir.StreamEvent) error {
 		select {
 		case <-ctx.Done():
@@ -333,17 +350,35 @@ func (s *Server) streamNativeProviderResponse(ctx context.Context, w http.Respon
 		if err := writer(event); err != nil {
 			return err
 		}
+		if !started {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.Header().Set("Cache-Control", "no-cache")
+			w.Header().Set("X-Accel-Buffering", "no")
+			w.WriteHeader(http.StatusOK)
+			if _, err := w.Write(buffer.Bytes()); err != nil {
+				return err
+			}
+			sink.target = w
+			started = true
+		}
 		flusher.Flush()
 		return nil
 	})
+	if err == nil && !started {
+		err = errors.New("upstream stream ended before its first event")
+	}
 	if err == nil && !hasUsage && !hasStreamError {
 		usage := estimateStreamUsage(request, output.String())
 		log.InputTokens = usage.InputTokens
 		log.OutputTokens = usage.OutputTokens
 		log.TokenEstimated = true
 	}
-	return err
+	return started, err
 }
+
+type switchWriter struct{ target io.Writer }
+
+func (w *switchWriter) Write(p []byte) (int, error) { return w.target.Write(p) }
 
 func geminiInboundModel(r *http.Request) (string, bool, bool) {
 	for _, prefix := range []string{"/v1beta/models/", "/v1/models/"} {

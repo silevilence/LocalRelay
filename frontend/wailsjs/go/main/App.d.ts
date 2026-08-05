@@ -33,6 +33,8 @@ export function InstallUpdate(arg1:string):Promise<void>;
 
 export function ListAPIKeys():Promise<Array<store.APIKey>>;
 
+export function ListAggregationMemberModels():Promise<Array<store.Model>>;
+
 export function ListModels(arg1:string):Promise<Array<store.Model>>;
 
 export function ListProviderPresets():Promise<Array<store.ProviderPreset>>;
