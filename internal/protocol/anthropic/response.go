@@ -33,9 +33,36 @@ type ContentBlock struct {
 	Content   any             `json:"content,omitempty"`
 }
 
+// MarshalJSON emits signature for every thinking block, including an empty
+// value. Anthropic-compatible clients validate it as a required string, while
+// non-thinking blocks must not carry the field.
+func (b ContentBlock) MarshalJSON() ([]byte, error) {
+	type contentBlock struct {
+		Type      string          `json:"type"`
+		Text      *string         `json:"text,omitempty"`
+		Thinking  *string         `json:"thinking,omitempty"`
+		Signature *string         `json:"signature,omitempty"`
+		ID        string          `json:"id,omitempty"`
+		Name      string          `json:"name,omitempty"`
+		Input     json.RawMessage `json:"input,omitempty"`
+		Source    *ImageSource    `json:"source,omitempty"`
+		ToolUseID string          `json:"tool_use_id,omitempty"`
+		Content   any             `json:"content,omitempty"`
+	}
+	var text, thinking, signature *string
+	if b.Type == "text" {
+		text = &b.Text
+	}
+	if b.Type == "thinking" {
+		thinking = &b.Thinking
+		signature = &b.Signature
+	}
+	return json.Marshal(contentBlock{Type: b.Type, Text: text, Thinking: thinking, Signature: signature, ID: b.ID, Name: b.Name, Input: b.Input, Source: b.Source, ToolUseID: b.ToolUseID, Content: b.Content})
+}
+
 type Usage struct {
-	InputTokens              int `json:"input_tokens,omitempty"`
-	OutputTokens             int `json:"output_tokens,omitempty"`
+	InputTokens              int `json:"input_tokens"`
+	OutputTokens             int `json:"output_tokens"`
 	CacheCreationInputTokens int `json:"cache_creation_input_tokens,omitempty"`
 	CacheReadInputTokens     int `json:"cache_read_input_tokens,omitempty"`
 }

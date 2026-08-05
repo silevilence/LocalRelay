@@ -19,7 +19,7 @@ type Response struct {
 }
 
 type OutputItem struct {
-	ID        string        `json:"id,omitempty"`
+	ID        string        `json:"id"`
 	Type      string        `json:"type"`
 	Status    string        `json:"status,omitempty"`
 	Role      string        `json:"role,omitempty"`
@@ -32,7 +32,7 @@ type OutputItem struct {
 type ContentPart struct {
 	Type        string `json:"type"`
 	Text        string `json:"text"`
-	Annotations []any  `json:"annotations,omitempty"`
+	Annotations []any  `json:"annotations"`
 }
 
 type Usage struct {
@@ -77,7 +77,7 @@ func FromIRResponse(resp ir.Response) (Response, error) {
 		Usage:  usageFromIR(resp.Usage),
 	}
 	for _, choice := range resp.Choices {
-		items, err := outputItemsFromIR(choice)
+		items, err := outputItemsFromIR(resp.ID, choice)
 		if err != nil {
 			return Response{}, err
 		}
@@ -86,21 +86,25 @@ func FromIRResponse(resp ir.Response) (Response, error) {
 	return out, nil
 }
 
-func outputItemsFromIR(choice ir.Choice) ([]OutputItem, error) {
+func outputItemsFromIR(responseID string, choice ir.Choice) ([]OutputItem, error) {
 	var items []OutputItem
 	var parts []ContentPart
-	for _, block := range choice.Message.Content {
+	for blockIndex, block := range choice.Message.Content {
 		switch block.Type {
 		case ir.BlockText:
 			parts = append(parts, ContentPart{Type: "output_text", Text: block.Text, Annotations: []any{}})
 		case ir.BlockThinking:
-			parts = append(parts, ContentPart{Type: "reasoning_text", Text: block.Text})
+			// The Responses clients targeted by this gateway accept only
+			// output_text inside message content. IR reasoning is therefore
+			// intentionally omitted at this protocol boundary.
+			continue
 		case ir.BlockToolCall:
 			args, err := argumentString(block.Arguments)
 			if err != nil {
 				return nil, err
 			}
 			items = append(items, OutputItem{
+				ID:        functionItemID(responseID, choice.Index, blockIndex),
 				Type:      "function_call",
 				Status:    "completed",
 				CallID:    block.ToolCallID,
@@ -113,6 +117,7 @@ func outputItemsFromIR(choice ir.Choice) ([]OutputItem, error) {
 	}
 	if len(parts) > 0 || len(items) == 0 {
 		msg := OutputItem{
+			ID:      messageItemID(responseID, choice.Index),
 			Type:    "message",
 			Status:  "completed",
 			Role:    string(ir.RoleAssistant),
@@ -136,6 +141,7 @@ func (s *StreamWriter) Write(event ir.StreamEvent) error {
 		})
 	case ir.StreamChoiceStart:
 		item := OutputItem{
+			ID:     messageItemID(s.response.ID, event.ChoiceIndex),
 			Type:   "message",
 			Status: "in_progress",
 			Role:   string(event.Role),
@@ -173,13 +179,10 @@ func (s *StreamWriter) writeBlockStart(event ir.StreamEvent) error {
 			"part":          ContentPart{Type: "output_text", Text: "", Annotations: []any{}},
 		})
 	case ir.BlockThinking:
-		return writeEvent(s.w, "response.content_part.added", map[string]any{
-			"output_index":  event.ChoiceIndex,
-			"content_index": event.BlockIndex,
-			"part":          ContentPart{Type: "reasoning_text", Text: ""},
-		})
+		return nil
 	case ir.BlockToolCall:
 		item := OutputItem{
+			ID:     functionItemID(s.response.ID, event.ChoiceIndex, event.BlockIndex),
 			Type:   "function_call",
 			Status: "in_progress",
 			CallID: event.ToolCallID,
@@ -205,12 +208,7 @@ func (s *StreamWriter) writeBlockDelta(event ir.StreamEvent) error {
 			"delta":         event.Delta,
 		})
 	case ir.BlockThinking:
-		s.text[contentKey(event)] += event.Delta
-		return writeEvent(s.w, "response.reasoning_text.delta", map[string]any{
-			"output_index":  event.ChoiceIndex,
-			"content_index": event.BlockIndex,
-			"delta":         event.Delta,
-		})
+		return nil
 	case ir.BlockToolCall:
 		item := s.items[event.BlockIndex]
 		item.CallID = firstNonEmpty(item.CallID, event.ToolCallID)
@@ -232,7 +230,7 @@ func (s *StreamWriter) writeBlockStop(event ir.StreamEvent) error {
 	case ir.BlockText:
 		return writeEvent(s.w, "response.output_text.done", map[string]any{"output_index": event.ChoiceIndex, "content_index": event.BlockIndex, "text": s.text[contentKey(event)]})
 	case ir.BlockThinking:
-		return writeEvent(s.w, "response.reasoning_text.done", map[string]any{"output_index": event.ChoiceIndex, "content_index": event.BlockIndex, "text": s.text[contentKey(event)]})
+		return nil
 	case ir.BlockToolCall:
 		item := s.items[event.BlockIndex]
 		item.Status = "completed"
@@ -281,6 +279,14 @@ func writeEvent(w io.Writer, eventType string, value map[string]any) error {
 
 func contentKey(event ir.StreamEvent) string {
 	return fmt.Sprintf("%d:%d", event.ChoiceIndex, event.BlockIndex)
+}
+
+func messageItemID(responseID string, choiceIndex int) string {
+	return fmt.Sprintf("msg_%s_%d", responseID, choiceIndex)
+}
+
+func functionItemID(responseID string, choiceIndex, blockIndex int) string {
+	return fmt.Sprintf("fc_%s_%d_%d", responseID, choiceIndex, blockIndex)
 }
 
 func firstNonEmpty(a, b string) string {

@@ -30,8 +30,41 @@ func TestFromIRResponse(t *testing.T) {
 	if resp.Output[0].Type != "message" || resp.Output[0].Content[0].Type != "output_text" {
 		t.Fatalf("message item = %#v", resp.Output[0])
 	}
-	if resp.Output[0].Content[1].Type != "reasoning_text" || resp.Output[1].Arguments != `{"q":"x"}` {
-		t.Fatalf("reasoning/tool = %#v", resp.Output)
+	if resp.Output[0].ID == "" || len(resp.Output[0].Content) != 1 || resp.Output[0].Content[0].Annotations == nil || resp.Output[1].ID == "" || resp.Output[1].Arguments != `{"q":"x"}` {
+		t.Fatalf("message/tool = %#v", resp.Output)
+	}
+}
+
+func TestResponseOutputUsesClientCompatibleMessageShape(t *testing.T) {
+	resp, err := FromIRResponse(ir.Response{
+		ID:    "resp_1",
+		Model: "gpt-test",
+		Choices: []ir.Choice{{Message: ir.Message{Role: ir.RoleAssistant, Content: []ir.ContentBlock{
+			ir.Text("hi"),
+			ir.Thinking("internal reasoning", ""),
+		}}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body struct {
+		Output []struct {
+			ID      string `json:"id"`
+			Content []struct {
+				Type        string `json:"type"`
+				Annotations []any  `json:"annotations"`
+			} `json:"content"`
+		} `json:"output"`
+	}
+	if err := json.Unmarshal(data, &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Output) != 1 || body.Output[0].ID == "" || len(body.Output[0].Content) != 1 || body.Output[0].Content[0].Type != "output_text" || body.Output[0].Content[0].Annotations == nil {
+		t.Fatalf("response = %s", data)
 	}
 }
 
@@ -59,10 +92,13 @@ func TestWriteStreamEvent(t *testing.T) {
 		}
 	}
 	got := out.String()
-	for _, want := range []string{"event: response.created", "event: response.output_text.delta", `"text":"hi"`, "event: response.reasoning_text.delta", `"text":"plan"`, "event: response.function_call_arguments.delta", "event: response.function_call_arguments.done", `"arguments":"{\"q\":\"x\"}"`, "event: response.output_item.done", "event: response.completed", `"total_tokens":3`} {
+	for _, want := range []string{"event: response.created", "event: response.output_text.delta", `"text":"hi"`, "event: response.function_call_arguments.delta", "event: response.function_call_arguments.done", `"arguments":"{\"q\":\"x\"}"`, "event: response.output_item.done", "event: response.completed", `"total_tokens":3`} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("missing %q in %s", want, got)
 		}
+	}
+	if strings.Contains(got, "reasoning_text") {
+		t.Fatalf("reasoning must not be emitted as message content: %s", got)
 	}
 }
 

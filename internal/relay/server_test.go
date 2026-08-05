@@ -245,6 +245,127 @@ func TestNativeInboundProtocolsStreamInTheirOwnFormats(t *testing.T) {
 	}
 }
 
+func TestNativeResponsesAndAnthropicCompatibilityWithReasoning(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl_test","model":"deepseek-test","choices":[{"index":0,"message":{"role":"assistant","content":"pong","reasoning_content":"internal plan"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":2}}`))
+	}))
+	defer upstream.Close()
+	s := openRelayStore(t)
+	defer s.Close()
+	if _, err := s.CreateProvider(store.ProviderInput{ID: "p1", Name: "P1", Type: "deepseek", BaseURL: upstream.URL + "/v1"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CreateModel(store.ModelInput{ID: "m1", ProviderID: "p1", Name: "M1"}); err != nil {
+		t.Fatal(err)
+	}
+	relay := New(s)
+	defer relay.Close()
+	server := httptest.NewServer(relay)
+	defer server.Close()
+
+	response, err := http.Post(server.URL+"/v1/responses", "application/json", strings.NewReader(`{"model":"p1/m1","input":"ping"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	var responseBody struct {
+		Output []struct {
+			ID      string `json:"id"`
+			Content []struct {
+				Type        string `json:"type"`
+				Annotations []any  `json:"annotations"`
+			} `json:"content"`
+		} `json:"output"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&responseBody); err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusOK || len(responseBody.Output) != 1 || responseBody.Output[0].ID == "" || len(responseBody.Output[0].Content) != 1 || responseBody.Output[0].Content[0].Type != "output_text" || responseBody.Output[0].Content[0].Annotations == nil {
+		t.Fatalf("responses status/body = %d/%#v", response.StatusCode, responseBody)
+	}
+
+	anthropicResponse, err := http.Post(server.URL+"/v1/messages", "application/json", strings.NewReader(`{"model":"p1/m1","max_tokens":8,"messages":[{"role":"user","content":"ping"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer anthropicResponse.Body.Close()
+	var anthropicBody struct {
+		Content []struct {
+			Type      string  `json:"type"`
+			Signature *string `json:"signature"`
+		} `json:"content"`
+	}
+	if err := json.NewDecoder(anthropicResponse.Body).Decode(&anthropicBody); err != nil {
+		t.Fatal(err)
+	}
+	if anthropicResponse.StatusCode != http.StatusOK || len(anthropicBody.Content) != 2 || anthropicBody.Content[1].Type != "thinking" || anthropicBody.Content[1].Signature == nil {
+		t.Fatalf("anthropic status/body = %d/%#v", anthropicResponse.StatusCode, anthropicBody)
+	}
+}
+
+func TestNativeStreamsRemainClientCompatibleWithReasoning(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, strings.Join([]string{
+			`data: {"id":"stream_1","model":"deepseek-test","choices":[{"index":0,"delta":{"role":"assistant"}}]}`,
+			``,
+			`data: {"id":"stream_1","model":"deepseek-test","choices":[{"index":0,"delta":{"reasoning_content":"internal plan"}}]}`,
+			``,
+			`data: {"id":"stream_1","model":"deepseek-test","choices":[{"index":0,"delta":{"content":"pong"},"finish_reason":"stop"}]}`,
+			``,
+			`data: [DONE]`,
+			``,
+		}, "\n"))
+	}))
+	defer upstream.Close()
+	s := openRelayStore(t)
+	defer s.Close()
+	if _, err := s.CreateProvider(store.ProviderInput{ID: "p1", Name: "P1", Type: "deepseek", BaseURL: upstream.URL + "/v1"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CreateModel(store.ModelInput{ID: "m1", ProviderID: "p1", Name: "M1"}); err != nil {
+		t.Fatal(err)
+	}
+	relay := New(s)
+	defer relay.Close()
+	server := httptest.NewServer(relay)
+	defer server.Close()
+
+	response, err := http.Post(server.URL+"/v1/responses", "application/json", strings.NewReader(`{"model":"p1/m1","stream":true,"input":"ping"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	responseBody, err := io.ReadAll(response.Body)
+	response.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{"event: response.output_text.delta", `"delta":"pong"`, "event: response.completed"} {
+		if !strings.Contains(string(responseBody), expected) {
+			t.Fatalf("Responses stream missing %q: %s", expected, responseBody)
+		}
+	}
+	if strings.Contains(string(responseBody), "reasoning_text") {
+		t.Fatalf("Responses stream leaked unsupported reasoning block: %s", responseBody)
+	}
+
+	anthropicResponse, err := http.Post(server.URL+"/v1/messages", "application/json", strings.NewReader(`{"model":"p1/m1","max_tokens":8,"stream":true,"messages":[{"role":"user","content":"ping"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	anthropicStream, err := io.ReadAll(anthropicResponse.Body)
+	anthropicResponse.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{`"usage":{"input_tokens":0,"output_tokens":0}`, `"type":"thinking","thinking":"","signature":""`, "event: message_stop"} {
+		if !strings.Contains(string(anthropicStream), expected) {
+			t.Fatalf("Anthropic stream missing %q: %s", expected, anthropicStream)
+		}
+	}
+}
+
 func TestChatCompletionRelayFallsBackToEstimatedUsage(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

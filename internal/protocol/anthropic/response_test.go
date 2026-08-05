@@ -70,10 +70,49 @@ func TestWriteStreamEvent(t *testing.T) {
 		}
 	}
 	got := out.String()
-	for _, want := range []string{"event: message_start", `"usage":{}`, `"type":"text_delta"`, `"text":"hi"`, `"type":"input_json_delta"`, `"partial_json":"{\"q\""`, `"stop_reason":"tool_use"`, "event: message_stop"} {
+	for _, want := range []string{"event: message_start", `"usage":{"input_tokens":0,"output_tokens":0}`, `"type":"text_delta"`, `"text":"hi"`, `"type":"input_json_delta"`, `"partial_json":"{\"q\""`, `"stop_reason":"tool_use"`, "event: message_stop"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("missing %q in %s", want, got)
 		}
+	}
+}
+
+func TestResponseIncludesRequiredUsageAndThinkingSignature(t *testing.T) {
+	var stream strings.Builder
+	if err := WriteStreamEvent(&stream, ir.StreamEvent{Type: ir.StreamMessageStart, ID: "msg_1", Model: "claude-test"}); err != nil {
+		t.Fatal(err)
+	}
+	var event struct {
+		Message struct {
+			Usage struct {
+				InputTokens  *int `json:"input_tokens"`
+				OutputTokens *int `json:"output_tokens"`
+			} `json:"usage"`
+		} `json:"message"`
+	}
+	payload := strings.TrimPrefix(strings.Split(stream.String(), "\n")[1], "data: ")
+	if err := json.Unmarshal([]byte(payload), &event); err != nil {
+		t.Fatal(err)
+	}
+	if event.Message.Usage.InputTokens == nil || event.Message.Usage.OutputTokens == nil {
+		t.Fatalf("message_start usage = %s", payload)
+	}
+
+	response, err := FromIRResponse(ir.Response{Choices: []ir.Choice{{Message: ir.Message{Role: ir.RoleAssistant, Content: []ir.ContentBlock{ir.Thinking("plan", "")}}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := json.Marshal(response)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(data, &body); err != nil {
+		t.Fatal(err)
+	}
+	block := body["content"].([]any)[0].(map[string]any)
+	if signature, ok := block["signature"].(string); !ok || signature != "" {
+		t.Fatalf("thinking block = %#v", block)
 	}
 }
 
