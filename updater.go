@@ -19,7 +19,7 @@ import (
 	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
-var appVersion = "0.2.0"
+var appVersion = "0.3.0"
 var releaseRepo = "silevilence/LocalRelay"
 
 const githubAPI = "https://api.github.com"
