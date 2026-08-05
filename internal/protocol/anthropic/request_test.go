@@ -36,6 +36,17 @@ func TestParseRequestAcceptsStringContent(t *testing.T) {
 	}
 }
 
+func TestTopKRoundTripsThroughIR(t *testing.T) {
+	request, err := ParseRequest([]byte(`{"model":"relay/claude","max_tokens":1,"top_k":40,"messages":[{"role":"user","content":"hello"}]}`))
+	if err != nil || request.Params.TopK == nil || *request.Params.TopK != 40 {
+		t.Fatalf("request/err = %#v/%v", request, err)
+	}
+	provider, err := ToProviderRequest(request)
+	if err != nil || provider.TopK == nil || *provider.TopK != 40 {
+		t.Fatalf("provider/err = %#v/%v", provider, err)
+	}
+}
+
 func TestParseRequestKeepsToolResultOrder(t *testing.T) {
 	request, err := ParseRequest([]byte(`{"model":"relay/claude","max_tokens":1,"messages":[{"role":"user","content":[{"type":"text","text":"before"},{"type":"tool_result","tool_use_id":"tool_1","content":"result"},{"type":"text","text":"after"}]}]}`))
 	if err != nil || len(request.Messages) != 3 || request.Messages[0].Content[0].Text != "before" || request.Messages[1].Role != "tool" || request.Messages[2].Content[0].Text != "after" {

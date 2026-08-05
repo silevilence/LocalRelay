@@ -32,6 +32,7 @@ type GenerationConfig struct {
 	MaxOutputTokens *int            `json:"maxOutputTokens,omitempty"`
 	Temperature     *float64        `json:"temperature,omitempty"`
 	TopP            *float64        `json:"topP,omitempty"`
+	TopK            *float64        `json:"topK,omitempty"`
 	StopSequences   []string        `json:"stopSequences,omitempty"`
 	ThinkingConfig  json.RawMessage `json:"thinkingConfig,omitempty"`
 }
@@ -55,6 +56,7 @@ func (r Request) ToIR(model string, stream bool) (ir.Request, error) {
 			MaxTokens:   r.GenerationConfig.MaxOutputTokens,
 			Temperature: r.GenerationConfig.Temperature,
 			TopP:        r.GenerationConfig.TopP,
+			TopK:        r.GenerationConfig.TopK,
 			Stop:        r.GenerationConfig.StopSequences,
 			Thinking:    r.GenerationConfig.ThinkingConfig,
 		},
@@ -179,6 +181,7 @@ func ToProviderRequest(req ir.Request) (Request, error) {
 		MaxOutputTokens: req.Params.MaxTokens,
 		Temperature:     req.Params.Temperature,
 		TopP:            req.Params.TopP,
+		TopK:            req.Params.TopK,
 		StopSequences:   req.Params.Stop,
 		ThinkingConfig:  req.Params.Thinking,
 	}}

@@ -30,3 +30,14 @@ func TestParseRequestKeepsFunctionResponseOrder(t *testing.T) {
 		t.Fatalf("request/err = %#v/%v", request, err)
 	}
 }
+
+func TestTopKRoundTripsThroughIR(t *testing.T) {
+	request, err := ParseRequest([]byte(`{"generationConfig":{"topK":32},"contents":[{"parts":[{"text":"hello"}]}]}`), "relay/gemini", false)
+	if err != nil || request.Params.TopK == nil || *request.Params.TopK != 32 {
+		t.Fatalf("request/err = %#v/%v", request, err)
+	}
+	provider, err := ToProviderRequest(request)
+	if err != nil || provider.GenerationConfig.TopK == nil || *provider.GenerationConfig.TopK != 32 {
+		t.Fatalf("provider/err = %#v/%v", provider, err)
+	}
+}

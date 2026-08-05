@@ -291,6 +291,8 @@ func ToProviderRequest(req ir.Request, cfg capabilities.Provider) (Request, erro
 		FrequencyPenalty: req.Params.FrequencyPenalty,
 		ResponseFormat:   req.Params.ResponseFormat,
 	}
+	// OpenAI Chat has no standard top_k field. The IR value is intentionally
+	// omitted on this boundary rather than sending a non-standard field.
 	if err := applyConfiguredFields(&out, req, cfg); err != nil {
 		return Request{}, err
 	}

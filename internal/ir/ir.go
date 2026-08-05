@@ -77,6 +77,7 @@ type Params struct {
 	MaxTokens        *int            `json:"maxTokens,omitempty"`
 	Temperature      *float64        `json:"temperature,omitempty"`
 	TopP             *float64        `json:"topP,omitempty"`
+	TopK             *float64        `json:"topK,omitempty"`
 	Stop             []string        `json:"stop,omitempty"`
 	ReasoningEffort  *string         `json:"reasoningEffort,omitempty"`
 	Thinking         json.RawMessage `json:"thinking,omitempty"`

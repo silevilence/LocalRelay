@@ -20,6 +20,7 @@ type Request struct {
 	Stream        bool            `json:"stream,omitempty"`
 	Temperature   *float64        `json:"temperature,omitempty"`
 	TopP          *float64        `json:"top_p,omitempty"`
+	TopK          *float64        `json:"top_k,omitempty"`
 	StopSequences []string        `json:"stop_sequences,omitempty"`
 	Thinking      json.RawMessage `json:"thinking,omitempty"`
 }
@@ -106,6 +107,7 @@ func (r Request) ToIR() (ir.Request, error) {
 			MaxTokens:   r.MaxTokens,
 			Temperature: r.Temperature,
 			TopP:        r.TopP,
+			TopK:        r.TopK,
 			Stop:        r.StopSequences,
 			Thinking:    r.Thinking,
 		},
@@ -215,6 +217,7 @@ func ToProviderRequest(req ir.Request) (Request, error) {
 		Stream:        req.Stream,
 		Temperature:   req.Params.Temperature,
 		TopP:          req.Params.TopP,
+		TopK:          req.Params.TopK,
 		StopSequences: req.Params.Stop,
 		Thinking:      req.Params.Thinking,
 	}
