@@ -17,12 +17,6 @@
   - [ ] 编写供应商配置与预设说明文档
   - [ ] 编写常见问题与故障排查文档
 
-- [ ] **实现对外协议入站解析补全（Anthropic/Gemini/OpenAI Response → IR）**
-  - [ ] 实现 Anthropic Messages 请求解析为 IR
-  - [ ] 实现 Gemini 请求解析为 IR
-  - [ ] 实现 OpenAI Response 请求解析为 IR
-  - [ ] 各协议入站时按各自方式识别 API Key 并写入统计应用列（Anthropic: `x-api-key`；Gemini: `x-goog-api-key` 或 query `key`；OpenAI Response: `Authorization: Bearer`），识别规则与 OpenAI Chat 入站保持一致
-
 ## 🚧 开发中
 
 ## ✅ 已完成
@@ -241,3 +235,9 @@
     - [x] 不主动过滤虚拟网卡（Docker/VMware/VPN 等），全部列出；每条地址后标注来源网卡名（如 `192.168.1.10 (以太网)`），跳过 `0.0.0.0` 与 `127.0.0.1` 重复
     - [x] 刷新时机：设置页打开时刷新一次、端口变更保存后刷新、提供手动"刷新"按钮；不做实时网卡监听
     - [x] 每条地址后一个复制按钮，复制完整 `http://<ip>:<port>` 到剪贴板，复用现有 API Key 复制按钮交互样式（图标 + 复制成功反馈）；不提供"一键复制全部"
+
+- [x] **实现对外协议入站解析补全（Anthropic/Gemini/OpenAI Response → IR）**
+  - [x] 实现 Anthropic Messages 请求解析为 IR
+  - [x] 实现 Gemini 请求解析为 IR
+  - [x] 实现 OpenAI Response 请求解析为 IR
+  - [x] 各协议入站时按各自方式识别 API Key 并写入统计应用列（Anthropic: `x-api-key`；Gemini: `x-goog-api-key` 或 query `key`；OpenAI Response: `Authorization: Bearer`），识别规则与 OpenAI Chat 入站保持一致
