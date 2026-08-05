@@ -19,11 +19,11 @@ export namespace main {
 	export class LocalAddress {
 	    url: string;
 	    source: string;
-
+	
 	    static createFrom(source: any = {}) {
 	        return new LocalAddress(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.url = source["url"];
@@ -33,11 +33,11 @@ export namespace main {
 	export class ProviderModel {
 	    id: string;
 	    name: string;
-
+	
 	    static createFrom(source: any = {}) {
 	        return new ProviderModel(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.id = source["id"];
@@ -219,11 +219,11 @@ export namespace store {
 	    hideOnClose: boolean;
 	    launchAtLogin: boolean;
 	    startMinimized: boolean;
-
+	
 	    static createFrom(source: any = {}) {
 	        return new DesktopSettings(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.gatewayEnabled = source["gatewayEnabled"];
@@ -511,3 +511,4 @@ export namespace store {
 	}
 
 }
+
