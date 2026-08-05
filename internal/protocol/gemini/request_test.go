@@ -40,4 +40,7 @@ func TestTopKRoundTripsThroughIR(t *testing.T) {
 	if err != nil || provider.GenerationConfig.TopK == nil || *provider.GenerationConfig.TopK != 32 {
 		t.Fatalf("provider/err = %#v/%v", provider, err)
 	}
+	if _, err := ParseRequest([]byte(`{"generationConfig":{"topK":32.5}}`), "relay/gemini", false); err == nil {
+		t.Fatal("expected non-integer topK error")
+	}
 }

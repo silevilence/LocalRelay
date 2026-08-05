@@ -47,6 +47,9 @@ func TestCapabilitySupportChecks(t *testing.T) {
 	if !cfg.SupportsRequestField("thinking") {
 		t.Fatal("deepseek should support thinking")
 	}
+	if !cfg.SupportsTopK() {
+		t.Fatal("deepseek should support top_k")
+	}
 	if cfg.Thinking.RequestMessageField != "reasoning_content" || !cfg.ToolCalls.RequireAssistantContent {
 		t.Fatalf("deepseek history/tool config = %#v", cfg)
 	}
@@ -68,6 +71,9 @@ func TestCapabilitySupportChecks(t *testing.T) {
 	}
 	if openai.MapReasoningEffort("high") != "high" {
 		t.Fatalf("openai high mapped to %q", openai.MapReasoningEffort("high"))
+	}
+	if openai.SupportsTopK() {
+		t.Fatal("OpenAI standard preset should not support top_k")
 	}
 	if cfg.SupportsReasoningEffort("extreme") {
 		t.Fatal("unexpected reasoning effort support")

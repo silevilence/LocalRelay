@@ -151,8 +151,9 @@ func (s *Server) handleNativeRequest(w http.ResponseWriter, r *http.Request, pro
 			toIR: func(capabilities.Provider) (ir.Request, error) {
 				// Native inbound parsing is intentionally protocol-faithful and
 				// provider-independent. Capability validation happens in the
-				// selected outbound adapter via toProviderRequest, which can return
-				// a precise unsupported-provider error without dropping fields.
+				// selected outbound adapter via toProviderRequest, which either
+				// preserves configured fields or returns an explicit unsupported-
+				// provider error rather than silently dropping them.
 				return request, nil
 			},
 		}, nil

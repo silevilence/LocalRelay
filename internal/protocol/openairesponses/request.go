@@ -197,8 +197,11 @@ func responseInputBlocks(parts InputContent) ([]ir.ContentBlock, error) {
 }
 
 func ToProviderRequest(req ir.Request) (Request, error) {
-	// OpenAI Responses has no top_k request parameter. The IR value is
-	// intentionally omitted when this is the selected upstream protocol.
+	if req.Params.TopK != nil {
+		// OpenAI Responses has no top_k request parameter. Reject instead of
+		// silently dropping the protocol-neutral sampling setting.
+		return Request{}, fmt.Errorf("OpenAI Responses upstream protocol does not support top_k")
+	}
 	reasoning := req.Params.Thinking
 	if len(reasoning) == 0 && req.Params.ReasoningEffort != nil {
 		data, err := json.Marshal(struct {

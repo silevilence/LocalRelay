@@ -32,7 +32,7 @@ type GenerationConfig struct {
 	MaxOutputTokens *int            `json:"maxOutputTokens,omitempty"`
 	Temperature     *float64        `json:"temperature,omitempty"`
 	TopP            *float64        `json:"topP,omitempty"`
-	TopK            *float64        `json:"topK,omitempty"`
+	TopK            *int            `json:"topK,omitempty"`
 	StopSequences   []string        `json:"stopSequences,omitempty"`
 	ThinkingConfig  json.RawMessage `json:"thinkingConfig,omitempty"`
 }

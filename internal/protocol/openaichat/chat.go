@@ -17,6 +17,7 @@ type Request struct {
 	MaxTokens        *int            `json:"max_tokens,omitempty"`
 	Temperature      *float64        `json:"temperature,omitempty"`
 	TopP             *float64        `json:"top_p,omitempty"`
+	TopK             *int            `json:"top_k,omitempty"`
 	Stop             any             `json:"stop,omitempty"`
 	PresencePenalty  *float64        `json:"presence_penalty,omitempty"`
 	FrequencyPenalty *float64        `json:"frequency_penalty,omitempty"`
@@ -291,8 +292,6 @@ func ToProviderRequest(req ir.Request, cfg capabilities.Provider) (Request, erro
 		FrequencyPenalty: req.Params.FrequencyPenalty,
 		ResponseFormat:   req.Params.ResponseFormat,
 	}
-	// OpenAI Chat has no standard top_k field. The IR value is intentionally
-	// omitted on this boundary rather than sending a non-standard field.
 	if err := applyConfiguredFields(&out, req, cfg); err != nil {
 		return Request{}, err
 	}
@@ -337,6 +336,12 @@ func applyConfiguredFields(out *Request, req ir.Request, cfg capabilities.Provid
 		}
 		mapped := cfg.MapReasoningEffort(*req.Params.ReasoningEffort)
 		out.ReasoningEffort = &mapped
+	}
+	if req.Params.TopK != nil {
+		if !cfg.SupportsTopK() {
+			return cfg.UnsupportedFieldError("top_k")
+		}
+		out.TopK = req.Params.TopK
 	}
 	if len(req.Params.Thinking) > 0 {
 		if !cfg.SupportsRequestField("thinking") {

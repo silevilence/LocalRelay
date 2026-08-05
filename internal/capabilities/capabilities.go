@@ -21,6 +21,7 @@ type Provider struct {
 	Protocol string `json:"protocol"`
 	// Thinking describes provider-specific thinking controls and content fields.
 	Thinking        Thinking        `json:"thinking,omitempty"`
+	Sampling        Sampling        `json:"sampling,omitempty"`
 	ReasoningEffort ReasoningEffort `json:"reasoningEffort,omitempty"`
 	ToolCalls       ToolCalls       `json:"toolCalls,omitempty"`
 	// Streaming describes provider-specific options for streamed responses.
@@ -37,6 +38,12 @@ type Thinking struct {
 	// ResponseContentField maps upstream assistant thinking text into IR.
 	// OpenAI Chat structs currently support only "reasoning_content".
 	ResponseContentField string `json:"responseContentField,omitempty"`
+}
+
+type Sampling struct {
+	// TopK enables the non-standard top_k extension used by compatible
+	// OpenAI Chat providers such as the DeepSeek preset.
+	TopK bool `json:"topK,omitempty"`
 }
 
 type ToolCalls struct {
@@ -96,6 +103,10 @@ func (p Provider) SupportsRequestField(field string) bool {
 	return slices.Contains(p.Thinking.RequestFields, field)
 }
 
+func (p Provider) SupportsTopK() bool {
+	return p.Sampling.TopK
+}
+
 func (p Provider) SupportsReasoningEffort(value string) bool {
 	if p.ReasoningEffort.Field != "reasoning_effort" {
 		return false
@@ -145,6 +156,7 @@ var defaults = map[string]Provider{
 	"openai-responses": {Protocol: ProtocolOpenAIResponse},
 	"deepseek": {
 		Protocol: ProtocolOpenAIChat,
+		Sampling: Sampling{TopK: true},
 		Thinking: Thinking{
 			RequestFields:        []string{"thinking"},
 			RequestMessageField:  ThinkingFieldReasoningContent,

@@ -45,6 +45,9 @@ func TestTopKRoundTripsThroughIR(t *testing.T) {
 	if err != nil || provider.TopK == nil || *provider.TopK != 40 {
 		t.Fatalf("provider/err = %#v/%v", provider, err)
 	}
+	if _, err := ParseRequest([]byte(`{"model":"relay/claude","max_tokens":1,"top_k":40.5,"messages":[]}`)); err == nil {
+		t.Fatal("expected non-integer top_k error")
+	}
 }
 
 func TestParseRequestKeepsToolResultOrder(t *testing.T) {

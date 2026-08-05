@@ -156,6 +156,7 @@ func TestConfiguredProviderFields(t *testing.T) {
 	thinking := json.RawMessage(`{"type":"enabled"}`)
 	enableThinking := false
 	budget := 4096
+	topK := 40
 
 	deepseek, err := ToProviderRequest(ir.Request{Params: ir.Params{
 		ReasoningEffort: &effort,
@@ -166,6 +167,10 @@ func TestConfiguredProviderFields(t *testing.T) {
 	}
 	if deepseek.ReasoningEffort == nil || *deepseek.ReasoningEffort != "max" || string(deepseek.Thinking) != string(thinking) {
 		t.Fatalf("deepseek configured fields = %#v", deepseek)
+	}
+	deepseek, err = ToProviderRequest(ir.Request{Params: ir.Params{TopK: &topK}}, mustCapabilities(t, capabilities.DefaultJSON("deepseek")))
+	if err != nil || deepseek.TopK == nil || *deepseek.TopK != 40 {
+		t.Fatalf("deepseek top_k = %#v/%v", deepseek, err)
 	}
 
 	siliconflow, err := ToProviderRequest(ir.Request{Params: ir.Params{
@@ -184,6 +189,9 @@ func TestConfiguredProviderFields(t *testing.T) {
 	}
 	if _, err := ToProviderRequest(ir.Request{Params: ir.Params{ThinkingBudget: &budget}}, mustCapabilities(t, capabilities.DefaultJSON("openai"))); err == nil {
 		t.Fatal("expected unsupported thinking_budget field error")
+	}
+	if _, err := ToProviderRequest(ir.Request{Params: ir.Params{TopK: &topK}}, mustCapabilities(t, capabilities.DefaultJSON("openai"))); err == nil {
+		t.Fatal("expected unsupported top_k field error")
 	}
 }
 

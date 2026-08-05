@@ -1,6 +1,10 @@
 package openairesponses
 
-import "testing"
+import (
+	"testing"
+
+	"localrelay/internal/ir"
+)
 
 func TestParseRequestToIR(t *testing.T) {
 	request, err := ParseRequest([]byte(`{
@@ -47,5 +51,12 @@ func TestParseRequestMapsReasoningEffortWithoutThinkingPayload(t *testing.T) {
 	provider, err := ToProviderRequest(request)
 	if err != nil || string(provider.Reasoning) != `{"effort":"high"}` {
 		t.Fatalf("provider/err = %#v/%v", provider, err)
+	}
+}
+
+func TestToProviderRequestRejectsTopK(t *testing.T) {
+	topK := 40
+	if _, err := ToProviderRequest(ir.Request{Params: ir.Params{TopK: &topK}}); err == nil {
+		t.Fatal("expected OpenAI Responses top_k error")
 	}
 }

@@ -20,7 +20,7 @@ type Request struct {
 	Stream        bool            `json:"stream,omitempty"`
 	Temperature   *float64        `json:"temperature,omitempty"`
 	TopP          *float64        `json:"top_p,omitempty"`
-	TopK          *float64        `json:"top_k,omitempty"`
+	TopK          *int            `json:"top_k,omitempty"`
 	StopSequences []string        `json:"stop_sequences,omitempty"`
 	Thinking      json.RawMessage `json:"thinking,omitempty"`
 }
@@ -144,6 +144,9 @@ func (r Request) ToIR() (ir.Request, error) {
 			case "tool_use":
 				ordinary = append(ordinary, ir.ToolCall(block.ID, block.Name, defaultRaw(block.Input, `{}`)))
 			case "tool_result":
+				// Anthropic's block-level is_error attribute is not representable
+				// by the current IR tool_result block, so only textual content is
+				// preserved by toolResultText.
 				result, err := toolResultText(block.Content)
 				if err != nil {
 					return ir.Request{}, err
