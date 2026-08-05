@@ -139,6 +139,16 @@ func TestMessageDeltaAlwaysIncludesDeltaAndUsageObjects(t *testing.T) {
 	}
 }
 
+func TestUsageOnlyMessageDeltaEndsTurn(t *testing.T) {
+	var out strings.Builder
+	if err := WriteStreamEvent(&out, ir.StreamEvent{Type: ir.StreamMessageDelta, Usage: ir.Usage{InputTokens: 3, OutputTokens: 2}}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), `"stop_reason":"end_turn"`) {
+		t.Fatalf("usage-only message_delta must keep a terminal stop reason: %s", out.String())
+	}
+}
+
 func TestForEachStreamEventIgnoresPing(t *testing.T) {
 	events, err := ParseStream(strings.NewReader(strings.Join([]string{
 		`event: message_start`,

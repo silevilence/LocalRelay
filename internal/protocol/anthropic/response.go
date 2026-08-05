@@ -153,10 +153,13 @@ func WriteStreamEvent(w io.Writer, event ir.StreamEvent) error {
 		return writeSSE(w, "content_block_stop", map[string]any{"type": "content_block_stop", "index": event.BlockIndex})
 	case ir.StreamMessageDelta:
 		// Anthropic clients require both objects on every message_delta, even
-		// when one side has no new values in this particular event.
-		data := map[string]any{"type": "message_delta", "delta": map[string]any{}, "usage": &Usage{}}
-		if event.StopReason != "" {
-			data["delta"] = map[string]any{"stop_reason": anthropicStop(event.StopReason), "stop_sequence": nil}
+		// when one side has no new values in this particular event. Usage-only
+		// tail events are terminal too, so preserve an explicit end_turn instead
+		// of making strict clients infer the unsupported "other" finish reason.
+		data := map[string]any{
+			"type":  "message_delta",
+			"delta": map[string]any{"stop_reason": anthropicStop(event.StopReason), "stop_sequence": nil},
+			"usage": &Usage{},
 		}
 		if event.Usage != (ir.Usage{}) {
 			data["usage"] = usageFromIR(event.Usage)

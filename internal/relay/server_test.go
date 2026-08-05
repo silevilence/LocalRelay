@@ -271,6 +271,7 @@ func TestNativeResponsesAndAnthropicCompatibilityWithReasoning(t *testing.T) {
 	defer response.Body.Close()
 	var responseBody struct {
 		Output []struct {
+			Type    string `json:"type"`
 			ID      string `json:"id"`
 			Content []struct {
 				Type        string `json:"type"`
@@ -281,7 +282,16 @@ func TestNativeResponsesAndAnthropicCompatibilityWithReasoning(t *testing.T) {
 	if err := json.NewDecoder(response.Body).Decode(&responseBody); err != nil {
 		t.Fatal(err)
 	}
-	if response.StatusCode != http.StatusOK || len(responseBody.Output) != 1 || responseBody.Output[0].ID == "" || len(responseBody.Output[0].Content) != 1 || responseBody.Output[0].Content[0].Type != "output_text" || responseBody.Output[0].Content[0].Annotations == nil {
+	hasReasoning, hasText := false, false
+	for _, item := range responseBody.Output {
+		if item.Type == "reasoning" && len(item.Content) == 1 && item.Content[0].Type == "reasoning_text" {
+			hasReasoning = true
+		}
+		if item.Type == "message" && item.ID != "" && len(item.Content) == 1 && item.Content[0].Type == "output_text" && item.Content[0].Annotations != nil {
+			hasText = true
+		}
+	}
+	if response.StatusCode != http.StatusOK || !hasReasoning || !hasText {
 		t.Fatalf("responses status/body = %d/%#v", response.StatusCode, responseBody)
 	}
 
@@ -341,13 +351,10 @@ func TestNativeStreamsRemainClientCompatibleWithReasoning(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, expected := range []string{"event: response.output_text.delta", `"item_id":"msg_stream_1_0"`, `"delta":"pong"`, "event: response.output_item.done", `"content":[{"type":"output_text","text":"pong","annotations":[]}]`, `"output":[`, "event: response.completed"} {
+	for _, expected := range []string{"event: response.reasoning_text.delta", "event: response.reasoning_text.done", `"type":"reasoning_text","text":"internal plan"`, "event: response.output_text.delta", `"item_id":"msg_stream_1_0"`, `"delta":"pong"`, "event: response.output_item.done", `"content":[{"type":"output_text","text":"pong","annotations":[]}]`, `"output":[`, "event: response.completed"} {
 		if !strings.Contains(string(responseBody), expected) {
 			t.Fatalf("Responses stream missing %q: %s", expected, responseBody)
 		}
-	}
-	if strings.Contains(string(responseBody), "reasoning_text") {
-		t.Fatalf("Responses stream leaked unsupported reasoning block: %s", responseBody)
 	}
 
 	anthropicResponse, err := http.Post(server.URL+"/v1/messages", "application/json", strings.NewReader(`{"model":"p1/m1","max_tokens":8,"stream":true,"messages":[{"role":"user","content":"ping"}]}`))
@@ -359,7 +366,7 @@ func TestNativeStreamsRemainClientCompatibleWithReasoning(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, expected := range []string{`"usage":{"input_tokens":0,"output_tokens":0}`, `"type":"thinking","thinking":"","signature":""`, "event: message_stop"} {
+	for _, expected := range []string{`"usage":{"input_tokens":0,"output_tokens":0}`, `"type":"thinking","thinking":"","signature":""`, `"stop_reason":"end_turn"`, "event: message_stop"} {
 		if !strings.Contains(string(anthropicStream), expected) {
 			t.Fatalf("Anthropic stream missing %q: %s", expected, anthropicStream)
 		}

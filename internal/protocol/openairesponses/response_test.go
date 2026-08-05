@@ -27,10 +27,16 @@ func TestFromIRResponse(t *testing.T) {
 	if resp.Object != "response" || resp.Status != "completed" || resp.Usage.TotalTokens != 10 {
 		t.Fatalf("response = %#v", resp)
 	}
-	if resp.Output[0].Type != "message" || resp.Output[0].Content[0].Type != "output_text" {
-		t.Fatalf("message item = %#v", resp.Output[0])
+	var message, tool *OutputItem
+	for i := range resp.Output {
+		switch resp.Output[i].Type {
+		case "message":
+			message = &resp.Output[i]
+		case "function_call":
+			tool = &resp.Output[i]
+		}
 	}
-	if resp.Output[0].ID == "" || len(resp.Output[0].Content) != 1 || resp.Output[0].Content[0].Annotations == nil || resp.Output[1].ID == "" || resp.Output[1].Arguments != `{"q":"x"}` {
+	if message == nil || message.Content[0].Type != "output_text" || message.ID == "" || len(message.Content) != 1 || message.Content[0].Annotations == nil || tool == nil || tool.ID == "" || tool.Arguments != `{"q":"x"}` {
 		t.Fatalf("message/tool = %#v", resp.Output)
 	}
 }
@@ -63,9 +69,41 @@ func TestResponseOutputUsesClientCompatibleMessageShape(t *testing.T) {
 	if err := json.Unmarshal(data, &body); err != nil {
 		t.Fatal(err)
 	}
-	if len(body.Output) != 1 || body.Output[0].ID == "" || len(body.Output[0].Content) != 1 || body.Output[0].Content[0].Type != "output_text" || body.Output[0].Content[0].Annotations == nil {
+	var message *struct {
+		ID      string `json:"id"`
+		Content []struct {
+			Type        string `json:"type"`
+			Annotations []any  `json:"annotations"`
+		} `json:"content"`
+	}
+	for i := range body.Output {
+		if body.Output[i].ID != "" && len(body.Output[i].Content) == 1 && body.Output[i].Content[0].Type == "output_text" {
+			message = &body.Output[i]
+			break
+		}
+	}
+	if len(body.Output) != 2 || message == nil || message.Content[0].Annotations == nil {
 		t.Fatalf("response = %s", data)
 	}
+}
+
+func TestResponseIncludesStandaloneReasoningItem(t *testing.T) {
+	resp, err := FromIRResponse(ir.Response{
+		ID: "resp_1",
+		Choices: []ir.Choice{{Message: ir.Message{Role: ir.RoleAssistant, Content: []ir.ContentBlock{
+			ir.Thinking("internal reasoning", ""),
+			ir.Text("hi"),
+		}}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range resp.Output {
+		if item.Type == "reasoning" && len(item.Content) == 1 && item.Content[0].Type == "reasoning_text" && item.Content[0].Text == "internal reasoning" {
+			return
+		}
+	}
+	t.Fatalf("response missing standalone reasoning item: %#v", resp.Output)
 }
 
 func TestWriteStreamEvent(t *testing.T) {
@@ -97,8 +135,8 @@ func TestWriteStreamEvent(t *testing.T) {
 			t.Fatalf("missing %q in %s", want, got)
 		}
 	}
-	if strings.Contains(got, "reasoning_text") {
-		t.Fatalf("reasoning must not be emitted as message content: %s", got)
+	if !strings.Contains(got, `"type":"reasoning"`) || !strings.Contains(got, `"type":"reasoning_text","text":"plan"`) {
+		t.Fatalf("reasoning must be emitted as a standalone output item: %s", got)
 	}
 }
 
@@ -119,6 +157,29 @@ func TestStreamWriterFinalizesTextMessageWithItemID(t *testing.T) {
 	}
 	got := out.String()
 	for _, want := range []string{`"item_id":"msg_resp_1_0"`, `event: response.output_item.done`, `"content":[{"type":"output_text","text":"hi","annotations":[]}]`, `"output":[`} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("missing %q in %s", want, got)
+		}
+	}
+}
+
+func TestStreamWriterEmitsReasoningOutputEvents(t *testing.T) {
+	var out strings.Builder
+	writer := NewStreamWriter(&out)
+	for _, event := range []ir.StreamEvent{
+		{Type: ir.StreamMessageStart, ID: "resp_1", Model: "gpt-test"},
+		{Type: ir.StreamChoiceStart, ChoiceIndex: 0, Role: ir.RoleAssistant},
+		{Type: ir.StreamContentBlockStart, ChoiceIndex: 0, BlockIndex: 0, BlockType: ir.BlockThinking},
+		{Type: ir.StreamContentBlockDelta, ChoiceIndex: 0, BlockIndex: 0, BlockType: ir.BlockThinking, Delta: "plan"},
+		{Type: ir.StreamContentBlockStop, ChoiceIndex: 0, BlockIndex: 0, BlockType: ir.BlockThinking},
+		{Type: ir.StreamMessageStop},
+	} {
+		if err := writer.Write(event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got := out.String()
+	for _, want := range []string{`"type":"reasoning"`, `"type":"reasoning_text","text":"plan"`, "event: response.reasoning_text.delta", "event: response.reasoning_text.done"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("missing %q in %s", want, got)
 		}
