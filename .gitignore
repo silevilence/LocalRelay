@@ -6,6 +6,8 @@ coverage
 cov_*.out
 *.out
 .gocache/
+.gomodcache/
+.gopath/
 .codegraph/
 
 frontend/dist/
