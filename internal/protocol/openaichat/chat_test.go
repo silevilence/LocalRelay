@@ -12,10 +12,12 @@ import (
 
 func TestParseTextChatToIR(t *testing.T) {
 	temp := 0.2
+	topK := 40
 	req, err := Request{
 		Model:       "gpt-4.1-mini",
 		Stream:      true,
 		Temperature: &temp,
+		TopK:        &topK,
 		Messages: []Message{
 			{Role: "system", Content: "You are concise."},
 			{Role: "user", Content: "Hello"},
@@ -24,7 +26,7 @@ func TestParseTextChatToIR(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if req.Model != "gpt-4.1-mini" || !req.Stream || req.Params.Temperature == nil || *req.Params.Temperature != temp {
+	if req.Model != "gpt-4.1-mini" || !req.Stream || req.Params.Temperature == nil || *req.Params.Temperature != temp || req.Params.TopK == nil || *req.Params.TopK != topK {
 		t.Fatalf("request = %#v", req)
 	}
 	if got := req.Messages[1].Content[0].Text; got != "Hello" {

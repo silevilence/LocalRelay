@@ -134,6 +134,7 @@ func (r Request) ToIRWithCapabilities(cfg capabilities.Provider) (ir.Request, er
 			MaxTokens:        r.MaxTokens,
 			Temperature:      r.Temperature,
 			TopP:             r.TopP,
+			TopK:             r.TopK,
 			PresencePenalty:  r.PresencePenalty,
 			FrequencyPenalty: r.FrequencyPenalty,
 			ResponseFormat:   r.ResponseFormat,
