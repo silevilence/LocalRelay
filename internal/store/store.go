@@ -321,6 +321,7 @@ func (s *Store) applyMigrations() error {
 		{7, s.ensureTokenEstimateColumn},
 		{8, s.ensureAggregationSchema},
 		{9, s.migrateAggregationConfigKeys},
+		{10, s.seedOpencodeReasoningContentCapabilities},
 	}
 	for _, migration := range migrations {
 		var exists int
@@ -338,6 +339,77 @@ func (s *Store) applyMigrations() error {
 		}
 	}
 	return nil
+}
+
+// seedOpencodeReasoningContentCapabilities upgrades the known models from the
+// bundled Opencode GO preset that require reasoning_content replay. The relay
+// itself is model-agnostic; any model can use the same capability fields.
+func (s *Store) seedOpencodeReasoningContentCapabilities() error {
+	rows, err := s.db.Query(`
+SELECT m.provider_id, m.id, m.capabilities
+FROM models m JOIN providers p ON p.id = m.provider_id
+WHERE (p.id = 'opencode-go' OR p.base_url LIKE '%opencode.ai/zen/go%')
+  AND lower(m.id) LIKE 'deepseek-v4-%'`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	type item struct {
+		providerID   string
+		modelID      string
+		capabilities string
+	}
+	var items []item
+	for rows.Next() {
+		var current item
+		if err := rows.Scan(&current.providerID, &current.modelID, &current.capabilities); err != nil {
+			return err
+		}
+		items = append(items, current)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, current := range items {
+		upgraded, err := mergeModelCapabilities(current.capabilities, reasoningContentModelCapabilities())
+		if err != nil {
+			return fmt.Errorf("upgrade capabilities for %s/%s: %w", current.providerID, current.modelID, err)
+		}
+		if _, err := s.db.Exec(`UPDATE models SET capabilities = ?, updated_at = ? WHERE provider_id = ? AND id = ?`, upgraded, timestamp(), current.providerID, current.modelID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func mergeModelCapabilities(current, defaultsRaw string) (string, error) {
+	var currentObject map[string]any
+	if strings.TrimSpace(current) == "" {
+		currentObject = map[string]any{}
+	} else if err := json.Unmarshal([]byte(current), &currentObject); err != nil {
+		return "", err
+	}
+	var defaultObject map[string]any
+	if err := json.Unmarshal([]byte(defaultsRaw), &defaultObject); err != nil {
+		return "", err
+	}
+	mergeMissingObjects(currentObject, defaultObject)
+	out, err := json.Marshal(currentObject)
+	return string(out), err
+}
+
+func mergeMissingObjects(dst, defaults map[string]any) {
+	for key, defaultValue := range defaults {
+		defaultObject, defaultIsObject := defaultValue.(map[string]any)
+		if existing, ok := dst[key]; ok {
+			existingObject, existingIsObject := existing.(map[string]any)
+			if defaultIsObject && existingIsObject {
+				mergeMissingObjects(existingObject, defaultObject)
+			}
+			continue
+		}
+		dst[key] = defaultValue
+	}
 }
 
 func (s *Store) ensureTokenEstimateColumn() error {
@@ -1328,6 +1400,9 @@ func validateModel(in ModelInput) error {
 	}
 	if in.ContextLength < 0 || in.MaxTokens < 0 {
 		return errors.New("token limits must be >= 0")
+	}
+	if err := capabilities.ValidateModel(in.Capabilities); err != nil {
+		return fmt.Errorf("model capabilities is invalid: %w", err)
 	}
 	return nil
 }

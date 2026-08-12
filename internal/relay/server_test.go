@@ -895,6 +895,100 @@ func TestDeepSeekReasoningContentRoundTrip(t *testing.T) {
 	}
 }
 
+func TestModelLevelReasoningContentPolicyAndExplicitDowngrade(t *testing.T) {
+	const strictCapabilities = `{
+		"tools":true,
+		"thinking":true,
+		"providerCapabilityOverrides":{
+			"thinking":{"requestFields":["thinking"],"requestMessageField":"reasoning_content","responseContentField":"reasoning_content","defaultEnabled":true},
+			"toolCalls":{"requireAssistantContent":true,"requireReasoningContent":true}
+		}
+	}`
+
+	t.Run("strict model lets upstream reject", func(t *testing.T) {
+		upstreamCalls := 0
+		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			upstreamCalls++
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":{"message":"reasoning_content is required","type":"invalid_request_error","code":"invalid_request_error"}}`))
+		}))
+		defer upstream.Close()
+		server := openModelCapabilityRelay(t, upstream.URL, strictCapabilities)
+		defer server.Close()
+
+		resp, err := http.Post(server.URL+"/v1/chat/completions", "application/json", bytes.NewBufferString(missingReasoningToolRequest()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest || upstreamCalls != 1 {
+			t.Fatalf("status/upstream calls = %d/%d", resp.StatusCode, upstreamCalls)
+		}
+		if code := errorCode(t, resp); code != "invalid_request_error" {
+			t.Fatalf("error code = %q", code)
+		}
+	})
+
+	t.Run("explicit model switch disables thinking", func(t *testing.T) {
+		var upstreamBody map[string]any
+		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if err := json.NewDecoder(r.Body).Decode(&upstreamBody); err != nil {
+				t.Fatal(err)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":"ok","model":"deepseek-v4-flash","choices":[{"index":0,"message":{"role":"assistant","content":"done"},"finish_reason":"stop"}]}`))
+		}))
+		defer upstream.Close()
+		server := openModelCapabilityRelay(t, upstream.URL, strings.Replace(strictCapabilities, `"tools":true`, `"tools":true,"allowThinkingDowngrade":true`, 1))
+		defer server.Close()
+
+		resp, err := http.Post(server.URL+"/v1/chat/completions", "application/json", bytes.NewBufferString(missingReasoningToolRequest()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d", resp.StatusCode)
+		}
+		thinking, _ := upstreamBody["thinking"].(map[string]any)
+		if thinking["type"] != "disabled" || upstreamBody["reasoning_effort"] != nil {
+			t.Fatalf("upstream request = %#v", upstreamBody)
+		}
+		messages := upstreamBody["messages"].([]any)
+		assistant := messages[1].(map[string]any)
+		if assistant["content"] != "" {
+			t.Fatalf("assistant message = %#v", assistant)
+		}
+	})
+}
+
+func openModelCapabilityRelay(t *testing.T, upstreamURL, modelCapabilities string) *httptest.Server {
+	t.Helper()
+	s := openRelayStore(t)
+	t.Cleanup(func() { _ = s.Close() })
+	if _, err := s.CreateProvider(store.ProviderInput{ID: "opencode-go", Name: "Opencode GO", Type: "openai-compatible", BaseURL: upstreamURL}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CreateModel(store.ModelInput{ID: "deepseek-v4-flash", ProviderID: "opencode-go", Name: "DeepSeek V4 Flash", Capabilities: modelCapabilities}); err != nil {
+		t.Fatal(err)
+	}
+	relay := New(s)
+	t.Cleanup(relay.Close)
+	return httptest.NewServer(relay)
+}
+
+func missingReasoningToolRequest() string {
+	return `{
+		"model":"opencode-go/deepseek-v4-flash",
+		"messages":[
+			{"role":"user","content":"weather?"},
+			{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"get_weather","arguments":"{}"}}]},
+			{"role":"tool","tool_call_id":"call_1","content":"sunny"}
+		]
+	}`
+}
+
 func TestDisabledModelIsRejected(t *testing.T) {
 	s := openRelayStore(t)
 	defer s.Close()

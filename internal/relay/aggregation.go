@@ -213,6 +213,9 @@ func (s *Server) forwardAggregation(ctx context.Context, w http.ResponseWriter, 
 		memberID := aggregationMemberID(candidate)
 		providerCfg, err := capabilities.Parse(candidate.Provider.CapabilityConfig)
 		if err == nil {
+			providerCfg, err = capabilities.ApplyModel(providerCfg, candidate.Model.Capabilities)
+		}
+		if err == nil {
 			var request ir.Request
 			request, err = incoming.toIR(providerCfg)
 			if err == nil {

@@ -217,6 +217,13 @@ func (s *Server) handleClientRequest(w http.ResponseWriter, r *http.Request, pro
 		writeError(w, status, "bad_provider_capabilities", err.Error())
 		return
 	}
+	providerCapabilities, err = capabilities.ApplyModel(providerCapabilities, routed.Model.Capabilities)
+	if err != nil {
+		status = http.StatusBadRequest
+		log.Error = err.Error()
+		writeError(w, status, "bad_model_capabilities", err.Error())
+		return
+	}
 	// Call logs record the protocol used for the upstream provider, matching
 	// the pre-existing OpenAI Chat entrypoint semantics.
 	log.Protocol = providerCapabilities.Protocol
@@ -232,7 +239,7 @@ func (s *Server) handleClientRequest(w http.ResponseWriter, r *http.Request, pro
 	if err != nil {
 		status = http.StatusBadRequest
 		log.Error = err.Error()
-		writeError(w, status, "unsupported_provider", err.Error())
+		writeError(w, status, "invalid_provider_request", err.Error())
 		return
 	}
 	upstreamBody, err := json.Marshal(providerReq)

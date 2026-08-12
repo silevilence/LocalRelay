@@ -159,7 +159,11 @@ func (r Request) ToIRWithCapabilities(cfg capabilities.Provider) (ir.Request, er
 	}
 
 	for _, msg := range r.Messages {
-		converted, err := msg.toIRWithCapabilities(cfg)
+		// OpenAI-compatible clients may send reasoning_content even when the
+		// selected provider needs a model-level capability override. Preserve the
+		// known extension in IR first; the provider conversion decides whether it
+		// can be forwarded.
+		converted, err := msg.toIRWithReasoningContent(true)
 		if err != nil {
 			return ir.Request{}, err
 		}
@@ -244,6 +248,10 @@ func (m Message) toIR() (ir.Message, error) {
 }
 
 func (m Message) toIRWithCapabilities(cfg capabilities.Provider) (ir.Message, error) {
+	return m.toIRWithReasoningContent(cfg.Thinking.ResponseContentField == capabilities.ThinkingFieldReasoningContent)
+}
+
+func (m Message) toIRWithReasoningContent(includeReasoning bool) (ir.Message, error) {
 	if err := validateRole(m.Role); err != nil {
 		return ir.Message{}, err
 	}
@@ -262,7 +270,7 @@ func (m Message) toIRWithCapabilities(cfg capabilities.Provider) (ir.Message, er
 		return ir.Message{}, err
 	}
 	out.Content = append(out.Content, blocks...)
-	if cfg.Thinking.ResponseContentField == capabilities.ThinkingFieldReasoningContent && m.ReasoningContent != "" {
+	if includeReasoning && m.ReasoningContent != "" {
 		out.Content = append(out.Content, ir.Thinking(m.ReasoningContent, ""))
 	}
 	for _, call := range m.ToolCalls {
@@ -281,6 +289,10 @@ func (m Message) toIRWithCapabilities(cfg capabilities.Provider) (ir.Message, er
 func ToProviderRequest(req ir.Request, cfg capabilities.Provider) (Request, error) {
 	if cfg.Protocol != capabilities.ProtocolOpenAIChat {
 		return Request{}, fmt.Errorf("unsupported provider protocol %q", cfg.Protocol)
+	}
+
+	if cfg.AllowThinkingDowngrade && cfg.ToolCalls.RequireReasoningContent && requestThinkingEnabled(req, cfg) && hasToolCallWithoutReasoning(req.Messages) {
+		disableThinking(&req, cfg)
 	}
 
 	out := Request{
@@ -435,6 +447,13 @@ func messageFromIRForField(msg ir.Message, cfg capabilities.Provider, thinkingFi
 		return out, nil
 	}
 	if len(parts) == 0 {
+		if msg.Role == ir.RoleAssistant {
+			if cfg.ToolCalls.RequireAssistantContent && out.ReasoningContent != "" {
+				out.Content = ""
+				return out, nil
+			}
+			return Message{}, errors.New("assistant message must contain content, reasoning_content, or tool_calls after provider conversion")
+		}
 		out.Content = nil
 		return out, nil
 	}
@@ -444,6 +463,69 @@ func messageFromIRForField(msg ir.Message, cfg capabilities.Provider, thinkingFi
 	}
 	out.Content = parts
 	return out, nil
+}
+
+func messageHasToolCall(msg ir.Message) bool {
+	for _, block := range msg.Content {
+		if block.Type == ir.BlockToolCall {
+			return true
+		}
+	}
+	return false
+}
+
+func messageHasReasoning(msg ir.Message) bool {
+	for _, block := range msg.Content {
+		if block.Type == ir.BlockThinking && block.Text != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func hasToolCallWithoutReasoning(messages []ir.Message) bool {
+	for _, msg := range messages {
+		if msg.Role == ir.RoleAssistant && messageHasToolCall(msg) && !messageHasReasoning(msg) {
+			return true
+		}
+	}
+	return false
+}
+
+func requestThinkingEnabled(req ir.Request, cfg capabilities.Provider) bool {
+	if req.Params.EnableThinking != nil {
+		return *req.Params.EnableThinking
+	}
+	if len(req.Params.Thinking) > 0 {
+		var value struct {
+			Type string `json:"type"`
+		}
+		if json.Unmarshal(req.Params.Thinking, &value) == nil {
+			switch value.Type {
+			case "disabled":
+				return false
+			case "enabled":
+				return true
+			}
+		}
+	}
+	return cfg.Thinking.DefaultEnabled || req.Params.ReasoningEffort != nil
+}
+
+func disableThinking(req *ir.Request, cfg capabilities.Provider) {
+	switch {
+	case cfg.SupportsRequestField("thinking"):
+		req.Params.Thinking = json.RawMessage(`{"type":"disabled"}`)
+		req.Params.EnableThinking = nil
+	case cfg.SupportsRequestField("enable_thinking"):
+		disabled := false
+		req.Params.EnableThinking = &disabled
+		req.Params.Thinking = nil
+	default:
+		return
+	}
+	req.Params.ReasoningEffort = nil
+	req.Params.ThinkingBudget = nil
 }
 
 func contentBlocks(content any) ([]ir.ContentBlock, error) {

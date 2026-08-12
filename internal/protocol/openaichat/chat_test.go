@@ -245,6 +245,121 @@ func TestConfiguredReasoningContentHistory(t *testing.T) {
 	}
 }
 
+func TestRequestToIRPreservesReasoningContentForProviderOverride(t *testing.T) {
+	req, err := Request{Messages: []Message{{
+		Role:             "assistant",
+		Content:          "",
+		ReasoningContent: "need a tool",
+		ToolCalls: []ToolCall{{
+			ID:       "call_1",
+			Type:     "function",
+			Function: FunctionCall{Name: "lookup", Arguments: `{}`},
+		}},
+	}}}.ToIRWithCapabilities(mustCapabilities(t, capabilities.DefaultJSON("openai-compatible")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(req.Messages) != 1 || len(req.Messages[0].Content) != 2 || req.Messages[0].Content[0].Type != ir.BlockThinking || req.Messages[0].Content[0].Text != "need a tool" {
+		t.Fatalf("reasoning history was not preserved in IR: %#v", req.Messages)
+	}
+}
+
+func TestReasoningContentToolHistoryPolicy(t *testing.T) {
+	cfg := mustCapabilities(t, capabilities.DefaultJSON("deepseek"))
+
+	t.Run("preserve adjacent assistant messages", func(t *testing.T) {
+		out, err := ToProviderRequest(ir.Request{Messages: []ir.Message{
+			{Role: ir.RoleAssistant, Content: []ir.ContentBlock{ir.Thinking("need a tool", "")}},
+			{Role: ir.RoleAssistant, Content: []ir.ContentBlock{ir.ToolCall("call_1", "lookup", json.RawMessage(`{}`))}},
+		}}, cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(out.Messages) != 2 || out.Messages[0].ReasoningContent != "need a tool" || len(out.Messages[1].ToolCalls) != 1 {
+			t.Fatalf("message boundaries changed: %#v", out.Messages)
+		}
+	})
+
+	t.Run("forward missing reasoning by default", func(t *testing.T) {
+		out, err := ToProviderRequest(ir.Request{Messages: []ir.Message{{
+			Role:    ir.RoleAssistant,
+			Content: []ir.ContentBlock{ir.ToolCall("call_1", "lookup", json.RawMessage(`{}`))},
+		}}}, cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(out.Messages) != 1 || out.Messages[0].ReasoningContent != "" || len(out.Messages[0].ToolCalls) != 1 || out.Messages[0].Content != "" {
+			t.Fatalf("forwarded history = %#v", out.Messages)
+		}
+	})
+
+	t.Run("explicit model policy disables thinking", func(t *testing.T) {
+		downgradeCfg, err := capabilities.ApplyModel(cfg, `{"allowThinkingDowngrade":true}`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		effort := "max"
+		out, err := ToProviderRequest(ir.Request{
+			Params: ir.Params{ReasoningEffort: &effort},
+			Messages: []ir.Message{{
+				Role:    ir.RoleAssistant,
+				Content: []ir.ContentBlock{ir.ToolCall("call_1", "lookup", json.RawMessage(`{}`))},
+			}},
+		}, downgradeCfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(out.Thinking) != `{"type":"disabled"}` || out.ReasoningEffort != nil {
+			t.Fatalf("downgraded request = %#v", out)
+		}
+	})
+
+	t.Run("unavailable downgrade field still forwards", func(t *testing.T) {
+		noDisableField := cfg
+		noDisableField.Thinking.RequestFields = nil
+		noDisableField.AllowThinkingDowngrade = true
+		out, err := ToProviderRequest(ir.Request{Messages: []ir.Message{{
+			Role:    ir.RoleAssistant,
+			Content: []ir.ContentBlock{ir.ToolCall("call_1", "lookup", json.RawMessage(`{}`))},
+		}}}, noDisableField)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(out.Thinking) != 0 || len(out.Messages[0].ToolCalls) != 1 {
+			t.Fatalf("request should be forwarded unchanged: %#v", out)
+		}
+	})
+
+	t.Run("explicit disabled thinking needs no reasoning history", func(t *testing.T) {
+		out, err := ToProviderRequest(ir.Request{
+			Params: ir.Params{Thinking: json.RawMessage(`{"type":"disabled"}`)},
+			Messages: []ir.Message{{
+				Role:    ir.RoleAssistant,
+				Content: []ir.ContentBlock{ir.ToolCall("call_1", "lookup", json.RawMessage(`{}`))},
+			}},
+		}, cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(out.Thinking) != `{"type":"disabled"}` {
+			t.Fatalf("thinking request = %s", out.Thinking)
+		}
+	})
+
+	t.Run("reasoning only assistant gets non-null content", func(t *testing.T) {
+		out, err := ToProviderRequest(ir.Request{Messages: []ir.Message{{
+			Role:    ir.RoleAssistant,
+			Content: []ir.ContentBlock{ir.Thinking("private", "")},
+		}}}, cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if out.Messages[0].Content != "" || out.Messages[0].ReasoningContent != "private" {
+			t.Fatalf("assistant message = %#v", out.Messages[0])
+		}
+	})
+}
+
 func TestOpenAIConfigDropsThinkingHistory(t *testing.T) {
 	out, err := ToProviderRequest(ir.Request{Messages: []ir.Message{{
 		Role: ir.RoleAssistant,

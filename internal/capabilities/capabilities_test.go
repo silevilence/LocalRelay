@@ -50,7 +50,7 @@ func TestCapabilitySupportChecks(t *testing.T) {
 	if !cfg.SupportsTopK() {
 		t.Fatal("deepseek should support top_k")
 	}
-	if cfg.Thinking.RequestMessageField != "reasoning_content" || !cfg.ToolCalls.RequireAssistantContent {
+	if cfg.Thinking.RequestMessageField != "reasoning_content" || !cfg.Thinking.DefaultEnabled || !cfg.ToolCalls.RequireAssistantContent || !cfg.ToolCalls.RequireReasoningContent {
 		t.Fatalf("deepseek history/tool config = %#v", cfg)
 	}
 	if !cfg.SupportsReasoningEffort("high") {
@@ -80,5 +80,55 @@ func TestCapabilitySupportChecks(t *testing.T) {
 	}
 	if cfg.UnsupportedFieldError("x") == nil {
 		t.Fatal("expected unsupported field error")
+	}
+}
+
+func TestApplyModelCapabilityOverrides(t *testing.T) {
+	base, err := Parse(DefaultJSON("openai-compatible"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	model := `{
+		"tools": true,
+		"thinking": true,
+		"allowThinkingDowngrade": true,
+		"providerCapabilityOverrides": {
+			"thinking": {
+				"requestFields": ["thinking"],
+				"requestMessageField": "reasoning_content",
+				"responseContentField": "reasoning_content",
+				"defaultEnabled": true
+			},
+			"toolCalls": {
+				"requireAssistantContent": true,
+				"requireReasoningContent": true
+			}
+		}
+	}`
+	merged, err := ApplyModel(base, model)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if merged.Protocol != ProtocolOpenAIChat || !merged.SupportsRequestField("thinking") || merged.Thinking.RequestMessageField != ThinkingFieldReasoningContent || !merged.Thinking.DefaultEnabled || !merged.ToolCalls.RequireAssistantContent || !merged.ToolCalls.RequireReasoningContent || !merged.AllowThinkingDowngrade {
+		t.Fatalf("merged model capabilities = %#v", merged)
+	}
+	if base.Thinking.RequestMessageField != "" || base.ToolCalls.RequireReasoningContent || base.AllowThinkingDowngrade {
+		t.Fatalf("base capabilities were mutated = %#v", base)
+	}
+}
+
+func TestValidateModelCapabilities(t *testing.T) {
+	for _, raw := range []string{
+		`{`,
+		`{"allowThinkingDowngrade":"yes"}`,
+		`{"providerCapabilityOverrides":[]}`,
+		`{"providerCapabilityOverrides":{"thinking":{"requestMessageField":"unsupported"}}}`,
+	} {
+		if err := ValidateModel(raw); err == nil {
+			t.Fatalf("expected invalid model capabilities for %s", raw)
+		}
+	}
+	if err := ValidateModel(`{"tools":true}`); err != nil {
+		t.Fatal(err)
 	}
 }

@@ -42,7 +42,8 @@ func BuiltinProviderPresets() []ProviderPreset {
 			CapabilityConfig: capabilities.DefaultJSON("openai-compatible"),
 			Models: []ModelInput{
 				{ID: "kimi-k3", Name: "Kimi K3", Capabilities: `{"tools":true,"thinking":true}`, ContextLength: 1048576, MaxTokens: 1048576},
-				{ID: "deepseek-v4-pro", Name: "DeepSeek V4 Pro", Capabilities: `{"tools":true,"thinking":true}`, ContextLength: 1000000, MaxTokens: 384000},
+				{ID: "deepseek-v4-flash", Name: "DeepSeek V4 Flash", Capabilities: reasoningContentModelCapabilities(), ContextLength: 1000000, MaxTokens: 384000},
+				{ID: "deepseek-v4-pro", Name: "DeepSeek V4 Pro", Capabilities: reasoningContentModelCapabilities(), ContextLength: 1000000, MaxTokens: 384000},
 			},
 		},
 		{
@@ -87,4 +88,8 @@ func BuiltinProviderPresets() []ProviderPreset {
 			},
 		},
 	}
+}
+
+func reasoningContentModelCapabilities() string {
+	return `{"tools":true,"thinking":true,"providerCapabilityOverrides":{"thinking":{"requestFields":["thinking"],"requestMessageField":"reasoning_content","responseContentField":"reasoning_content","defaultEnabled":true},"toolCalls":{"requireAssistantContent":true,"requireReasoningContent":true}}}`
 }

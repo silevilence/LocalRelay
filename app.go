@@ -304,6 +304,10 @@ func (a *App) TestProviderModel(providerID string, modelID string) (ProviderTest
 	if err != nil {
 		return ProviderTestResult{}, err
 	}
+	cfg, err = capabilities.ApplyModel(cfg, routed.Model.Capabilities)
+	if err != nil {
+		return ProviderTestResult{}, err
+	}
 	maxTokens := 16
 	irReq := ir.Request{
 		Model:    routed.Model.ID,

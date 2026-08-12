@@ -1033,6 +1033,53 @@ func TestBuiltinProviderPresets(t *testing.T) {
 	}
 }
 
+func TestSeedOpencodeReasoningContentCapabilities(t *testing.T) {
+	s := openTestStore(t)
+	defer s.Close()
+	for _, provider := range []ProviderInput{
+		{ID: "opencode-go", Name: "Opencode GO", Type: "openai-compatible", BaseURL: "https://opencode.ai/zen/go/v1"},
+		{ID: "other", Name: "Other", Type: "openai-compatible", BaseURL: "https://example.test/v1"},
+	} {
+		if _, err := s.CreateProvider(provider); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, model := range []ModelInput{
+		{ID: "deepseek-v4-flash", ProviderID: "opencode-go", Name: "DeepSeek", Capabilities: `{"tools":true}`},
+		{ID: "kimi-k3", ProviderID: "opencode-go", Name: "Kimi", Capabilities: `{"tools":true}`},
+		{ID: "deepseek-v4-flash", ProviderID: "other", Name: "Other DeepSeek", Capabilities: `{"tools":true}`},
+	} {
+		if _, err := s.CreateModel(model); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.seedOpencodeReasoningContentCapabilities(); err != nil {
+		t.Fatal(err)
+	}
+	models, err := s.ListModels("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, model := range models {
+		merged := strings.Contains(model.Capabilities, "requireReasoningContent")
+		want := model.ProviderID == "opencode-go" && model.ID == "deepseek-v4-flash"
+		if merged != want {
+			t.Fatalf("model %s/%s compatibility = %v, want %v: %s", model.ProviderID, model.ID, merged, want, model.Capabilities)
+		}
+	}
+}
+
+func TestModelCapabilitiesAreValidated(t *testing.T) {
+	s := openTestStore(t)
+	defer s.Close()
+	if _, err := s.CreateProvider(ProviderInput{ID: "p", Name: "P", Type: "openai", BaseURL: "https://example.test"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CreateModel(ModelInput{ID: "m", ProviderID: "p", Name: "M", Capabilities: `{"allowThinkingDowngrade":"yes"}`}); err == nil {
+		t.Fatal("expected invalid model capabilities error")
+	}
+}
+
 func TestEnableVolcengineCodingStreamUsage(t *testing.T) {
 	s := openTestStore(t)
 	defer s.Close()

@@ -2019,10 +2019,36 @@ function ProviderCapabilityEditor({value, onChange}) {
 function ModelCapabilityEditor({value, onChange}) {
     const cfg = parseJsonObject(value, {});
     const preview = formatJSON(cleanObject(cfg));
+	const providerOverrides = cfg.providerCapabilityOverrides || {};
+	const thinkingOverrides = providerOverrides.thinking || {};
+	const toolCallOverrides = providerOverrides.toolCalls || {};
+	const reasoningContentReplay = thinkingOverrides.requestMessageField === "reasoning_content"
+		&& thinkingOverrides.responseContentField === "reasoning_content"
+		&& toolCallOverrides.requireReasoningContent === true;
 
     function toggle(key, checked) {
         onChange(formatJSON(cleanObject({...cfg, [key]: checked})));
     }
+
+	function updateOverrides(thinking, toolCalls, extra = {}) {
+		onChange(formatJSON(cleanObject({
+			...cfg,
+			...extra,
+			providerCapabilityOverrides: cleanObject({
+				...providerOverrides,
+				thinking: cleanObject(thinking),
+				toolCalls: cleanObject(toolCalls),
+			}),
+		})));
+	}
+
+	function toggleReasoningContentReplay(checked) {
+		updateOverrides(
+			{...thinkingOverrides, requestMessageField: checked ? "reasoning_content" : undefined, responseContentField: checked ? "reasoning_content" : undefined},
+			{...toolCallOverrides, requireReasoningContent: checked},
+			{allowThinkingDowngrade: checked ? cfg.allowThinkingDowngrade : undefined},
+		);
+	}
 
     return (
         <section className="rounded-2xl border border-zinc-800 bg-zinc-950/30 p-4">
@@ -2033,6 +2059,40 @@ function ModelCapabilityEditor({value, onChange}) {
                 <CheckField label="支持视觉输入" checked={cfg.vision === true || cfg.image === true} onChange={(checked) => toggle("vision", checked)} />
                 <CheckField label="支持思考模式" checked={cfg.thinking === true} onChange={(checked) => toggle("thinking", checked)} />
             </div>
+			<div className="mt-4 space-y-3 rounded-xl border border-zinc-800 bg-black/20 p-4">
+				<div>
+					<h4 className="text-sm font-bold text-zinc-200">上游消息兼容</h4>
+					<p className="mt-1 text-xs leading-5 text-zinc-500">这些规则属于当前模型，可用于任何需要对应 OpenAI Chat 扩展字段的模型。</p>
+				</div>
+				<CheckField
+					label="保留并回传 reasoning_content"
+					checked={reasoningContentReplay}
+					onChange={toggleReasoningContentReplay}
+				/>
+				<CheckField
+					label="工具调用 assistant 必须包含 content"
+					checked={toolCallOverrides.requireAssistantContent === true}
+					onChange={(checked) => updateOverrides(thinkingOverrides, {...toolCallOverrides, requireAssistantContent: checked})}
+				/>
+				<CheckField
+					label="模型默认启用思考模式"
+					checked={thinkingOverrides.defaultEnabled === true}
+					onChange={(checked) => updateOverrides({...thinkingOverrides, defaultEnabled: checked}, toolCallOverrides)}
+				/>
+				<MultiCheckField
+					label="思考请求字段（模型覆盖）"
+					values={thinkingOverrides.requestFields || []}
+					options={thinkingRequestFieldOptions}
+					onChange={(requestFields) => updateOverrides({...thinkingOverrides, requestFields}, toolCallOverrides)}
+				/>
+				<CheckField
+					label="允许缺失 reasoning_content 时关闭思考模式继续请求"
+					checked={cfg.allowThinkingDowngrade === true}
+					disabled={!reasoningContentReplay}
+					onChange={(checked) => toggle("allowThinkingDowngrade", checked)}
+				/>
+				<p className="text-xs leading-5 text-amber-500/70">默认关闭。关闭时缺失字段的请求仍会发往上游；开启后仅在配置了可用思考开关字段时关闭思考模式。</p>
+			</div>
             <details className="mt-4 rounded-xl border border-zinc-800 bg-black/20">
                 <summary className="cursor-pointer px-4 py-3 text-sm font-semibold text-zinc-300">查看最终 JSON 配置</summary>
                 <JsonPreview value={preview} />
@@ -2140,10 +2200,10 @@ function SelectField({label, value, onChange, options}) {
     );
 }
 
-function CheckField({label, checked, onChange}) {
+function CheckField({label, checked, onChange, disabled = false}) {
     return (
-        <label className="flex items-center gap-2 rounded-xl border border-zinc-800 bg-[#151515] px-3 py-2.5 text-sm font-semibold text-zinc-300">
-            <input type="checkbox" checked={checked} onChange={(event) => onChange(event.target.checked)} />
+		<label className="flex items-center gap-2 rounded-xl border border-zinc-800 bg-[#151515] px-3 py-2.5 text-sm font-semibold text-zinc-300 has-disabled:cursor-not-allowed has-disabled:opacity-50">
+			<input type="checkbox" checked={checked} disabled={disabled} onChange={(event) => onChange(event.target.checked)} />
             {label}
         </label>
     );

@@ -26,6 +26,10 @@ type Provider struct {
 	ToolCalls       ToolCalls       `json:"toolCalls,omitempty"`
 	// Streaming describes provider-specific options for streamed responses.
 	Streaming Streaming `json:"streaming,omitempty"`
+	// AllowThinkingDowngrade is a model-level policy populated by ApplyModel.
+	// It is deliberately excluded from provider JSON so downgrading can never be
+	// enabled implicitly for every model on a provider.
+	AllowThinkingDowngrade bool `json:"-"`
 }
 
 type Thinking struct {
@@ -38,6 +42,9 @@ type Thinking struct {
 	// ResponseContentField maps upstream assistant thinking text into IR.
 	// OpenAI Chat structs currently support only "reasoning_content".
 	ResponseContentField string `json:"responseContentField,omitempty"`
+	// DefaultEnabled marks providers such as DeepSeek whose thinking mode is on
+	// when the request does not carry an explicit thinking switch.
+	DefaultEnabled bool `json:"defaultEnabled,omitempty"`
 }
 
 type Sampling struct {
@@ -48,6 +55,7 @@ type Sampling struct {
 
 type ToolCalls struct {
 	RequireAssistantContent bool `json:"requireAssistantContent,omitempty"`
+	RequireReasoningContent bool `json:"requireReasoningContent,omitempty"`
 }
 
 type Streaming struct {
@@ -88,6 +96,68 @@ func Parse(raw string) (Provider, error) {
 func Validate(raw string) error {
 	_, err := Parse(raw)
 	return err
+}
+
+// ApplyModel overlays provider protocol capabilities with the optional
+// providerCapabilityOverrides object stored in a model's capabilities JSON.
+// The explicit allowThinkingDowngrade flag is model-scoped and defaults to
+// false even when the provider supports disabling thinking.
+func ApplyModel(base Provider, raw string) (Provider, error) {
+	if strings.TrimSpace(raw) == "" {
+		return base, nil
+	}
+	var model map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(raw), &model); err != nil {
+		return Provider{}, fmt.Errorf("parse model capabilities: %w", err)
+	}
+
+	merged := base
+	if overrideRaw, ok := model["providerCapabilityOverrides"]; ok {
+		var override map[string]any
+		if err := json.Unmarshal(overrideRaw, &override); err != nil {
+			return Provider{}, errors.New("model providerCapabilityOverrides must be an object")
+		}
+		baseRaw, err := json.Marshal(base)
+		if err != nil {
+			return Provider{}, err
+		}
+		var combined map[string]any
+		if err := json.Unmarshal(baseRaw, &combined); err != nil {
+			return Provider{}, err
+		}
+		mergeObjects(combined, override)
+		combinedRaw, err := json.Marshal(combined)
+		if err != nil {
+			return Provider{}, err
+		}
+		merged, err = Parse(string(combinedRaw))
+		if err != nil {
+			return Provider{}, fmt.Errorf("model providerCapabilityOverrides is invalid: %w", err)
+		}
+	}
+	if downgradeRaw, ok := model["allowThinkingDowngrade"]; ok {
+		if err := json.Unmarshal(downgradeRaw, &merged.AllowThinkingDowngrade); err != nil {
+			return Provider{}, errors.New("model allowThinkingDowngrade must be a boolean")
+		}
+	}
+	return merged, nil
+}
+
+func ValidateModel(raw string) error {
+	_, err := ApplyModel(defaults["openai"], raw)
+	return err
+}
+
+func mergeObjects(dst, src map[string]any) {
+	for key, value := range src {
+		srcObject, srcIsObject := value.(map[string]any)
+		dstObject, dstIsObject := dst[key].(map[string]any)
+		if srcIsObject && dstIsObject {
+			mergeObjects(dstObject, srcObject)
+			continue
+		}
+		dst[key] = value
+	}
 }
 
 func DefaultJSON(providerType string) string {
@@ -161,6 +231,7 @@ var defaults = map[string]Provider{
 			RequestFields:        []string{"thinking"},
 			RequestMessageField:  ThinkingFieldReasoningContent,
 			ResponseContentField: ThinkingFieldReasoningContent,
+			DefaultEnabled:       true,
 		},
 		ReasoningEffort: ReasoningEffort{
 			Field:  "reasoning_effort",
@@ -171,7 +242,7 @@ var defaults = map[string]Provider{
 				"xhigh":  "max",
 			},
 		},
-		ToolCalls: ToolCalls{RequireAssistantContent: true},
+		ToolCalls: ToolCalls{RequireAssistantContent: true, RequireReasoningContent: true},
 	},
 	"siliconflow": {
 		Protocol: ProtocolOpenAIChat,
