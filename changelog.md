@@ -1,5 +1,17 @@
 # Change Log
 
+## V0.3.1
+
+### ✨ 新功能
+
+- **模型级能力覆盖**：能力规则可细化到单个模型，不再受所属供应商预设限制；模型能力编辑页新增「上游消息兼容」配置区，可设置思考字段、reasoning_content 回传等规则
+- **思考降级开关**：模型可开启「缺失 reasoning_content 时关闭思考模式继续请求」，开启后此类请求会自动关闭思考模式继续执行，而不是直接失败
+- **DeepSeek V4 Flash 预设**：Opencode GO 预设新增 DeepSeek V4 Flash 模型，V4 Pro/Flash 预设默认启用 reasoning_content 保留回传
+
+### 🐛 Bug 修复
+
+- **DeepSeek V4 工具调用历史被上游拒绝**：助手工具调用历史消息缺失 reasoning_content 时 DeepSeek V4 上游会直接报错；现在网关会保留并回传该字段，已有 Opencode GO 的 DeepSeek V4 模型配置会自动升级修复，无需手动修改
+
 ## V0.3.0
 
 ### ✨ 新功能

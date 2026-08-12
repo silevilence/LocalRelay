@@ -8,9 +8,9 @@
 - **统一模型路由**：对外以 `供应商ID/模型ID` 形式路由到具体模型，可自由设置对外提供的模型范围。
 - **聚合路由**：可创建无上游凭据的聚合 Provider，并以主备、轮询、按 Token 均衡或分时策略路由到真实成员模型；主备在连接、超时、HTTP/解析失败时会在首个 SSE 事件前切换备成员。
 - **多协议出站适配**：对上游支持 OpenAI Chat、Anthropic Messages、Google Gemini、OpenAI Responses 四种协议，按各供应商实际接口自动转换。
-- **OpenAI Chat 入站**：对外暴露 OpenAI Chat Completions 兼容接口（`/v1/chat/completions`、`/v1/models`），支持流式与非流式。
+- **四协议入站**：对外同时暴露 OpenAI Chat Completions（`/v1/chat/completions`、`/v1/models`）、Anthropic Messages（`/v1/messages`）、OpenAI Responses（`/v1/responses`）、Google Gemini（`/v1beta/models/*:generateContent`）四种协议入口，各协议原生客户端可直接调用，均支持流式与非流式。
 - **流式转发**：完整支持流式输出链路，工具调用与思考内容在流式场景下可正确传递。
-- **供应商能力差异兼容**：通过可配置的能力描述层处理思考开关、`reasoning_effort`、流式用量等差异字段，新增供应商无需改动核心逻辑。
+- **供应商能力差异兼容**：通过可配置的能力描述层处理思考开关、`reasoning_effort`、流式用量等差异字段，新增供应商无需改动核心逻辑；能力规则还可细化到单个模型（模型级覆盖），如 DeepSeek V4 的 `reasoning_content` 保留回传与「缺失时关闭思考模式继续请求」降级策略。
 - **从上游拉取模型**：添加模型时可从上游 `/models` 接口拉取可用列表，勾选批量添加。
 - **Token 用量统计**：按时间区间、供应商、模型、应用维度统计 Token 用量，区分输入、输出与缓存命中；上游未返回用量时本地估算并标记来源。
 - **调用日志**：记录每次调用的输入输出、耗时、状态码、协议、是否流式等信息，支持分页查看与导出 CSV。
@@ -79,7 +79,7 @@ desktop_other.go     非 Windows 平台的桌面集成占位（不崩溃兼容�
 updater.go           应用内自动更新
 internal/
   ir/                内部统一协议格式（非流式 Request/Response + 流式 StreamEvent）
-  capabilities/      供应商能力描述层（协议、思考、reasoning_effort、流式用量等）
+  capabilities/      供应商能力描述层（协议、思考、reasoning_effort、流式用量、模型级覆盖等）
   protocol/
     openaichat/      OpenAI Chat 入站解析与出站转换
     anthropic/       Anthropic Messages 出站转换

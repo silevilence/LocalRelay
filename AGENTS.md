@@ -8,8 +8,8 @@
 
 - 统一管理多个 LLM 提供商（Provider）及其下模型（Model）的配置。
 - 对外以统一接口转发请求到各提供商，支持以 `providerId/modelId` 的形式路由到具体模型。
-- 对外规划支持四种主流协议入口：**OpenAI Chat Completions**、**OpenAI Responses**、**Anthropic Messages**、**Google Gemini**。当前仅实现 **OpenAI Chat Completions** 入站（`/v1/chat/completions`、`/v1/models`、`/healthz`），其余三种入站解析在 ROADMAP 计划中；出站（IR → 上游）四种协议均已实现。
-- 记录每次调用日志，支持按时间区间统计 Token 使用（输入/输出分别统计，支持缓存 Token 区分，视提供商能力而定）。上游成功响应但未返回 usage 时，网关按请求与响应内容本地估算 Token 并在日志/统计中标记 `token_estimated`，上游返回的 usage 始终优先。
+- 对外支持四种主流协议入口：**OpenAI Chat Completions**（`/v1/chat/completions`、`/v1/models`、`/healthz`）、**Anthropic Messages**（`/v1/messages`）、**OpenAI Responses**（`/v1/responses`）、**Google Gemini**（`/v1beta/models/*:generateContent`），四种协议的入站解析与出站（IR → 上游）转换均已实现。
+- 记录每次调用日志，支持按时间区间统计 Token 使用（输入/输出分别统计，支持缓存 Token 区分，视提供商能力而定）。上游成功响应但未返回 usage 时，网关按请求与响应内容本地估算 Token 并在日志/统计中标记 `token_estimated`，上游返回的 usage 始终优先。四种入站协议按各自习惯识别 API Key 并写入统计「应用」列（OpenAI Chat/Responses 用 `Authorization: Bearer`；Anthropic 用 `x-api-key`；Gemini 用 `x-goog-api-key` 或 query `key`），识别规则与 OpenAI Chat 入站保持一致。
 - 提供美观易用、指引明确的本地管理界面。
 
 ### 架构核心思路
@@ -18,7 +18,9 @@
 - 内部格式设计以 **Anthropic Messages 结构为蓝本**做适度扩展（block 化的 content 表达能力最强，其他协议可视为其降级映射）。
 - 流式（SSE）与非流式的内部格式**分别设计**，不假设可以互相简单派生。
 - 不同提供商在同一协议类型下的细节差异（思考开关字段、reasoning_effort 取值、思考内容是否回传、cache token 字段命名、流式是否需要 `stream_options.include_usage` 等）通过**可配置的"能力描述 + 适配器"层**解决，不硬编码 if-else，新增/调整某个提供商的怪异字段应尽量只改配置，不改核心转换逻辑。能力配置结构见 `internal/capabilities`（`Provider` 含 `Protocol` / `Thinking` / `ReasoningEffort` / `ToolCalls` / `Streaming`）。
-- 优先实现「OpenAI Chat → 内部格式」与「内部格式 → 各上游协议」，再逐步扩展「OpenAI Response / Anthropic / Google → 内部格式」。### 桌面集成与平台分层
+- 能力规则可细化到**模型级**：模型的能力 JSON 可携带 `providerCapabilityOverrides`（结构与供应商能力配置一致，深合并覆盖，如 reasoning_content 回传、requireAssistantContent、thinking 字段等）与模型级 `allowThinkingDowngrade` 布尔策略（请求含工具调用但历史缺失 reasoning_content 时自动关闭思考模式继续请求，默认关闭），请求时经 `capabilities.ApplyModel` 与供应商能力合并后再进入协议转换，`AllowThinkingDowngrade` 被排除在供应商 JSON 之外、只能模型级显式开启。模型能力写入前须经 `capabilities.ValidateModel` 校验；新增预设或迁移（如 store 迁移 v10 为 Opencode GO 的 DeepSeek V4 模型补齐配置）必须与此机制一致，禁止绕过校验直接写库。
+
+### 桌面集成与平台分层
 
 - 桌面集成（系统托盘、开机启动、窗口最小化/关闭隐藏、启动隐藏、网关服务启停）通过 **Go build tag** 分平台实现：`desktop_windows.go`（`//go:build windows`）承载 Windows 完整实现，`desktop_other.go`（`//go:build !windows`）提供同名方法的空实现/不支持错误，确保非 Windows 构建不崩溃。新增平台集成能力必须同时补齐 `desktop_other.go` 的占位，禁止让非目标平台编译失败。
 - 桌面相关开关（`GatewayEnabled` / `HideOnMinimize` / `HideOnClose` / `LaunchAtLogin` / `StartMinimized`）持久化在 `app_settings` 表，统一通过 `internal/store.DesktopSettings` 读写；新增桌面开关应扩展该结构体并补默认值，不要新建独立的存储表。前端绑定集中在 `app_desktop.go`。
