@@ -234,7 +234,7 @@ func (s *Server) forwardAggregation(ctx context.Context, w http.ResponseWriter, 
 						if cancel != nil {
 							defer cancel()
 						}
-						resp, postErr := s.postProvider(attemptCtx, candidate.Provider, providerCfg, candidate.Model.ID, request.Stream, body)
+						resp, postErr := s.postProvider(attemptCtx, candidate.Provider, providerCfg, candidate.Model.ID, request.Stream, body, incoming.clientHeaders)
 						if postErr != nil {
 							err = postErr
 						} else if request.Stream && resp.StatusCode >= 200 && resp.StatusCode < 300 {

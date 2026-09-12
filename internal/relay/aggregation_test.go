@@ -64,11 +64,14 @@ func TestAggregationRuntimeStrategiesAndCooldown(t *testing.T) {
 }
 
 func TestAggregationPrimaryBackupRetriesHTTPFailure(t *testing.T) {
+	seen := make(chan http.Header, 2)
 	bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen <- r.Header.Clone()
 		http.Error(w, "unavailable", http.StatusServiceUnavailable)
 	}))
 	defer bad.Close()
 	good := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen <- r.Header.Clone()
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"id":"ok","model":"second","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":2,"completion_tokens":1}}`))
 	}))
@@ -92,6 +95,14 @@ func TestAggregationPrimaryBackupRetriesHTTPFailure(t *testing.T) {
 	relay := New(s)
 	defer relay.Close()
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewBufferString(`{"model":"agg/route","messages":[{"role":"user","content":"ping"}]}`))
+	req.Header.Set("X-Session-Id", "original-session")
+	relay.client.Transport = headerRoundTripper(func(out *http.Request) (*http.Response, error) {
+		resp, err := http.DefaultTransport.RoundTrip(out)
+		// Mutating the original inbound request must not change the captured
+		// session used by the backup attempt.
+		req.Header["X-Session-Id"][0] = "mutated-inbound"
+		return resp, err
+	})
 	response := httptest.NewRecorder()
 	relay.ServeHTTP(response, req)
 	if response.Code != http.StatusOK {
@@ -99,6 +110,14 @@ func TestAggregationPrimaryBackupRetriesHTTPFailure(t *testing.T) {
 	}
 	if !bytes.Contains(response.Body.Bytes(), []byte(`"model":"p2/second"`)) {
 		t.Fatalf("response = %s", response.Body.String())
+	}
+	if len(seen) != 2 {
+		t.Fatalf("attempts = %d, want 2", len(seen))
+	}
+	for range 2 {
+		if header := <-seen; header.Get("X-Session-Id") != "original-session" {
+			t.Errorf("retry lost the inbound snapshot: %v", header)
+		}
 	}
 }
 

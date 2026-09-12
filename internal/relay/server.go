@@ -99,9 +99,10 @@ func (s *Server) handleModels(w http.ResponseWriter) {
 }
 
 type inboundRequest struct {
-	model  string
-	stream bool
-	toIR   func(capabilities.Provider) (ir.Request, error)
+	model         string
+	stream        bool
+	clientHeaders http.Header
+	toIR          func(capabilities.Provider) (ir.Request, error)
 }
 
 type inboundRequestParser func([]byte) (inboundRequest, error)
@@ -190,6 +191,8 @@ func (s *Server) handleClientRequest(w http.ResponseWriter, r *http.Request, pro
 		writeError(w, status, "bad_request", err.Error())
 		return
 	}
+	// Keep one immutable snapshot for both direct routing and every aggregation attempt.
+	incoming.clientHeaders = r.Header.Clone()
 	log.Stream = incoming.stream
 	routed, err := s.store.GetRoutedModel(incoming.model)
 	if err != nil {
@@ -249,7 +252,7 @@ func (s *Server) handleClientRequest(w http.ResponseWriter, r *http.Request, pro
 		writeError(w, status, "marshal_error", err.Error())
 		return
 	}
-	upstreamResp, err := s.postProvider(r.Context(), routed.Provider, providerCapabilities, routed.Model.ID, irReq.Stream, upstreamBody)
+	upstreamResp, err := s.postProvider(r.Context(), routed.Provider, providerCapabilities, routed.Model.ID, irReq.Stream, upstreamBody, incoming.clientHeaders)
 	if err != nil {
 		status = http.StatusBadGateway
 		log.Error = err.Error()
@@ -475,23 +478,24 @@ func (s *Server) writeLogs() {
 	}
 }
 
-func (s *Server) postProvider(ctx context.Context, provider store.Provider, cfg capabilities.Provider, model string, stream bool, body []byte) (*http.Response, error) {
+func (s *Server) postProvider(ctx context.Context, provider store.Provider, cfg capabilities.Provider, model string, stream bool, body []byte, clientHeaders http.Header) (*http.Response, error) {
 	req, err := http.NewRequest(http.MethodPost, providerURL(provider.BaseURL, cfg.Protocol, model, stream), bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
 	req = req.WithContext(ctx)
+	req.Header = upstreamHeaders(clientHeaders)
 	req.Header.Set("Content-Type", "application/json")
+	authHeader, authValue := "Authorization", "Bearer "+provider.APIKey
+	switch cfg.Protocol {
+	case capabilities.ProtocolGemini:
+		authHeader, authValue = "X-Goog-Api-Key", provider.APIKey
+	case capabilities.ProtocolAnthropic:
+		req.Header.Set("Anthropic-Version", "2023-06-01")
+		authHeader, authValue = "X-Api-Key", provider.APIKey
+	}
 	if provider.APIKey != "" {
-		switch cfg.Protocol {
-		case capabilities.ProtocolGemini:
-			req.Header.Set("X-Goog-Api-Key", provider.APIKey)
-		case capabilities.ProtocolAnthropic:
-			req.Header.Set("X-Api-Key", provider.APIKey)
-			req.Header.Set("Anthropic-Version", "2023-06-01")
-		default:
-			req.Header.Set("Authorization", "Bearer "+provider.APIKey)
-		}
+		req.Header.Set(authHeader, authValue)
 	}
 	return s.client.Do(req)
 }

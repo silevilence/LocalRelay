@@ -256,3 +256,11 @@
   - [x] 统计与日志：`call_logs` 新增 `aggregation_source`（经由的聚合模型）与 `agg_attempts`（失败明细 JSON）两列（走 schema 迁移）；日志记实际成员一条，统计数据自动归入基础模型；统计页聚合维度可见（token 不重复计），筛选器含聚合模型（按 `aggregation_source` 匹配）
   - [x] 前端界面：聚合模型编辑弹窗（与普通模型表单互斥）含成员有序列表（两级下拉、排除聚合模型、支持上下移/删除）、策略参数表单（主备冷却期/按Token/分时例外表）、能力交集只读预览（成员变更实时刷新）
   - [x] 并发与测试：每聚合模型一把锁（`sync.Map` 存锁实例），熔断/计数器/游标受锁保护；单元测试覆盖策略选择/熔断/交集/错误包装/分时边界（熔断器时钟注入 `now` 函数）；集成测试用 httptest mock 上游验证主备 HTTP 层切换与流式首事件前切换；新模块（策略选择器、熔断器、交集计算器）独立成文件；提交前用真实 API Key 手动验证一次主备调用
+
+- [x] **默认透传客户端请求头到上游（黑名单排除，非白名单匹配）**
+  - [x] 入站：`handleClientRequest` 捕获 `r.Header`（`Clone`）随 `inboundRequest` 传递，聚合路由 `forwardAggregation` 复用同一份；四种入站协议、流式与非流式路径共用同一份快照
+  - [x] 出站：`postProvider` 默认把捕获的客户端请求头**全部**复制到上游请求（新增 header 参数），先整体复制、再覆盖敏感/协议头
+  - [x] 覆盖顺序：`Content-Type: application/json` 与上游认证头（Authorization / X-Api-Key / X-Goog-Api-Key / Anthropic-Version）由网关**无条件**写入，不被入站同名头覆盖；上游未配置 API Key 时也必须先删除入站认证头，避免把网关 Key 泄露给上游
+  - [x] 固定排除清单（移除优先于透传）：逐跳头 `Connection` / `Keep-Alive` / `Proxy-Connection` / `TE` / `Trailer` / `Transfer-Encoding` / `Upgrade` / `Proxy-Authenticate` / `Proxy-Authorization`；`Cookie`；`Content-Length`（由 Go `ContentLength` 管理）；`Accept-Encoding`（否则 Go Transport 不做自动解压，压缩响应会破坏 JSON/SSE 解析）；`Host` 不在 `r.Header` 内，天然不透传
+  - [x] 测试：任意自定义头默认透传（如 `Idempotency-Key`、`X-Session-Id`、`x-opencode-session`）；入站认证类头不泄露（含上游无 Key 场景）；逐跳头 / Cookie / Accept-Encoding 被剔除；聚合主备切换重试仍带同一会话头；流式与非流式行为一致
+  - [x] 端到端验证：用任意 HTTP 客户端（curl 等）携带自定义/会话头请求网关，mock 上游断言收到相同值且不含被排除头；不依赖特定客户端（如 OpenCode CLI），无对应客户端时以模拟请求验证为准
