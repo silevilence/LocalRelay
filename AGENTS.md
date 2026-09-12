@@ -10,6 +10,7 @@
 - 对外以统一接口转发请求到各提供商，支持以 `providerId/modelId` 的形式路由到具体模型。
 - 对外支持四种主流协议入口：**OpenAI Chat Completions**（`/v1/chat/completions`、`/v1/models`、`/healthz`）、**Anthropic Messages**（`/v1/messages`）、**OpenAI Responses**（`/v1/responses`）、**Google Gemini**（`/v1beta/models/*:generateContent`），四种协议的入站解析与出站（IR → 上游）转换均已实现。
 - 记录每次调用日志，支持按时间区间统计 Token 使用（输入/输出分别统计，支持缓存 Token 区分，视提供商能力而定）。上游成功响应但未返回 usage 时，网关按请求与响应内容本地估算 Token 并在日志/统计中标记 `token_estimated`，上游返回的 usage 始终优先。四种入站协议按各自习惯识别 API Key 并写入统计「应用」列（OpenAI Chat/Responses 用 `Authorization: Bearer`；Anthropic 用 `x-api-key`；Gemini 用 `x-goog-api-key` 或 query `key`），识别规则与 OpenAI Chat 入站保持一致。
+- 客户端请求头**默认透传**到上游（黑名单排除，而非白名单匹配）：自定义会话/幂等/追踪类头无需改代码即可到达上游；逐跳头、`Cookie`、客户端凭据与不适用于重写后请求体的编码头会被剔除，发往上游的认证头与 `Content-Type` 始终由网关按当前供应商重写。
 - 提供美观易用、指引明确的本地管理界面。
 
 ### 架构核心思路
@@ -19,6 +20,13 @@
 - 流式（SSE）与非流式的内部格式**分别设计**，不假设可以互相简单派生。
 - 不同提供商在同一协议类型下的细节差异（思考开关字段、reasoning_effort 取值、思考内容是否回传、cache token 字段命名、流式是否需要 `stream_options.include_usage` 等）通过**可配置的"能力描述 + 适配器"层**解决，不硬编码 if-else，新增/调整某个提供商的怪异字段应尽量只改配置，不改核心转换逻辑。能力配置结构见 `internal/capabilities`（`Provider` 含 `Protocol` / `Thinking` / `ReasoningEffort` / `ToolCalls` / `Streaming`）。
 - 能力规则可细化到**模型级**：模型的能力 JSON 可携带 `providerCapabilityOverrides`（结构与供应商能力配置一致，深合并覆盖，如 reasoning_content 回传、requireAssistantContent、thinking 字段等）与模型级 `allowThinkingDowngrade` 布尔策略（请求含工具调用但历史缺失 reasoning_content 时自动关闭思考模式继续请求，默认关闭），请求时经 `capabilities.ApplyModel` 与供应商能力合并后再进入协议转换，`AllowThinkingDowngrade` 被排除在供应商 JSON 之外、只能模型级显式开启。模型能力写入前须经 `capabilities.ValidateModel` 校验；新增预设或迁移（如 store 迁移 v10 为 Opencode GO 的 DeepSeek V4 模型补齐配置）必须与此机制一致，禁止绕过校验直接写库。
+
+### 客户端请求头透传与安全边界
+
+- 出站请求头由 `internal/relay/headers.go` 的 `upstreamHeaders` 构造：**默认透传全部客户端请求头**，采用黑名单排除。入站侧在 `handleClientRequest` 中以 `r.Header.Clone()` 快照一次，随 `inboundRequest.clientHeaders` 传给 `postProvider`；直连与聚合路由（`forwardAggregation`）共用同一份快照，聚合主备重试仍携带同一会话标识。`postProvider` 是 relay 转发链路上唯一的上游请求构造点，直连与聚合、流式与非流式均经它出站（`app.go` 的供应商连通性测试为应用自发请求，不经客户端头透传）。
+- 排除清单为**包级只读常量** `excludedClientHeaders`：逐跳头（`Connection` / `Keep-Alive` / `Proxy-Connection` / `TE` / `Trailer` / `Transfer-Encoding` / `Upgrade` / `Proxy-Authenticate` / `Proxy-Authorization`）、`Cookie`、`Host`、`Content-Length`、`Content-Encoding`、`Expect`、`Accept-Encoding`，以及客户端凭据与协议头 `Authorization` / `X-Api-Key` / `X-Goog-Api-Key` / `Anthropic-Version` / `Content-Type`；另按 RFC 9110 §7.6.1 额外排除 `Connection` 头中列出的字段名（该动态部分必须留在函数局部，禁止写入包级常量，否则会污染其他请求的过滤结果）。
+- 排除依据：请求体经 IR 转换后由 `json.Marshal` 重新序列化为未压缩 JSON，入站 `Content-Encoding` / `Expect` / `Content-Length` 不再描述该请求体；转发客户端 `Accept-Encoding` 会关闭 Go Transport 的自动解压，破坏压缩 JSON/SSE 的解析。新增敏感头时必须同步加入排除清单。
+- 上游请求的 `Content-Type: application/json` 与认证头由 `postProvider` **无条件重写**（Anthropic 另写 `Anthropic-Version: 2023-06-01`）；未配置上游 API Key 时同样先删除入站凭据，禁止把客户端凭据转发给第三方上游。
 
 ### 桌面集成与平台分层
 

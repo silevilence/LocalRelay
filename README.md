@@ -8,6 +8,7 @@
 - **统一模型路由**：对外以 `供应商ID/模型ID` 形式路由到具体模型，可自由设置对外提供的模型范围。
 - **聚合路由**：可创建无上游凭据的聚合 Provider，并以主备、轮询、按 Token 均衡或分时策略路由到真实成员模型；主备在连接、超时、HTTP/解析失败时会在首个 SSE 事件前切换备成员。
 - **多协议出站适配**：对上游支持 OpenAI Chat、Anthropic Messages、Google Gemini、OpenAI Responses 四种协议，按各供应商实际接口自动转换。
+- **客户端请求头透传**：客户端携带的自定义请求头（会话标识、幂等键、追踪标识等）默认原样转发到上游，便于上游按会话归并上下文、去重与限流；直连与聚合路由行为一致，主备切换重试仍携带同一会话标识。逐跳头、`Cookie`、客户端凭据以及与实际请求体不符的编码声明会被自动剔除，发往上游的认证头与 `Content-Type` 始终由网关按当前供应商重写。
 - **四协议入站**：对外同时暴露 OpenAI Chat Completions（`/v1/chat/completions`、`/v1/models`）、Anthropic Messages（`/v1/messages`）、OpenAI Responses（`/v1/responses`）、Google Gemini（`/v1beta/models/*:generateContent`）四种协议入口，各协议原生客户端可直接调用，均支持流式与非流式。
 - **流式转发**：完整支持流式输出链路，工具调用与思考内容在流式场景下可正确传递。
 - **供应商能力差异兼容**：通过可配置的能力描述层处理思考开关、`reasoning_effort`、流式用量等差异字段，新增供应商无需改动核心逻辑；能力规则还可细化到单个模型（模型级覆盖），如 DeepSeek V4 的 `reasoning_content` 保留回传与「缺失时关闭思考模式继续请求」降级策略。
@@ -85,7 +86,7 @@ internal/
     anthropic/       Anthropic Messages 出站转换
     gemini/          Google Gemini 出站转换
     openairesponses/ OpenAI Responses 出站转换
-  relay/             HTTP 网关服务、流式转发、Token 估算
+  relay/             HTTP 网关服务、流式转发、请求头透传、Token 估算
   store/             SQLite 存储层、迁移、预设、统计查询、桌面设置
 frontend/            React + TailwindCSS 前端
 build/               Wails 打包配置（Windows NSIS、macOS plist）
