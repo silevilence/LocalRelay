@@ -497,6 +497,9 @@ func (s *Server) postProvider(ctx context.Context, provider store.Provider, cfg 
 	if provider.APIKey != "" {
 		req.Header.Set(authHeader, authValue)
 	}
+	if stream {
+		return doStreamRequest(s.client, req)
+	}
 	return s.client.Do(req)
 }
 
