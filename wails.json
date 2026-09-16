@@ -13,7 +13,7 @@
   "info": {
     "companyName": "LocalRelay",
     "productName": "LocalRelay",
-    "productVersion": "0.3.2",
+    "productVersion": "0.3.3",
     "copyright": "Copyright (c) 2026 silevilence",
     "comments": "Local LLM relay and gateway desktop app"
   }
