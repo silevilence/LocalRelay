@@ -102,12 +102,18 @@ func (a *App) InstallUpdate(tagName string) error {
 	}
 
 	a.emitUpdateProgress(UpdateProgress{Phase: "installing", Percent: 100, Message: "校验通过，正在启动静默安装…"})
-	if err := startInstallerAfterExit(installer); err != nil {
+	return a.launchUpdateInstaller(installer, startInstallerAfterExit)
+}
+
+func (a *App) launchUpdateInstaller(installer string, start func(string) error) error {
+	if err := start(installer); err != nil {
 		a.logUpdate("failed to start installer: " + err.Error())
 		return err
 	}
 	a.logUpdate("started update installer: " + installer)
-	wailsruntime.Quit(a.ctx)
+	// Wails Quit invokes beforeClose too. Use the explicit exit path so the
+	// installer waiting for this process is not blocked by hide-on-close.
+	a.RequestQuit()
 	return nil
 }
 

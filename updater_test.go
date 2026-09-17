@@ -1,6 +1,78 @@
 package main
 
-import "testing"
+import (
+	"context"
+	"errors"
+	"path/filepath"
+	"testing"
+
+	"localrelay/internal/store"
+)
+
+func TestLaunchUpdateInstallerQuit(t *testing.T) {
+	for _, hideOnClose := range []bool{true, false} {
+		for _, startFails := range []bool{false, true} {
+			name := "close-exits"
+			if hideOnClose {
+				name = "close-hides"
+			}
+			if startFails {
+				name += "/launch-fails"
+			} else {
+				name += "/launch-succeeds"
+			}
+			t.Run(name, func(t *testing.T) {
+				t.Setenv("APPDATA", t.TempDir())
+				t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+				s, err := store.Open(filepath.Join(t.TempDir(), "localrelay.db"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer s.Close()
+				settings, err := s.DesktopSettings()
+				if err != nil {
+					t.Fatal(err)
+				}
+				settings.HideOnClose = hideOnClose
+				if err := s.SetDesktopSettings(settings); err != nil {
+					t.Fatal(err)
+				}
+				app := &App{store: s}
+				startErr := errors.New("installer could not start")
+				called := false
+				err = app.launchUpdateInstaller("verified-installer.exe", func(path string) error {
+					called = true
+					if path != "verified-installer.exe" {
+						t.Fatalf("installer path = %q", path)
+					}
+					if app.quitting.Load() {
+						t.Fatal("app requested exit before installer launch succeeded")
+					}
+					if startFails {
+						return startErr
+					}
+					return nil
+				})
+				if !called {
+					t.Fatal("installer was not launched")
+				}
+				if startFails && !errors.Is(err, startErr) || !startFails && err != nil {
+					t.Fatalf("launch error = %v", err)
+				}
+				if got := app.beforeClose(context.Background()); got != (startFails && hideOnClose) {
+					t.Fatalf("close intercepted = %v: successful update must exit instead of hiding to tray", got)
+				}
+				if app.quitting.Load() != !startFails {
+					t.Fatalf("quitting = %v, launch failed = %v", app.quitting.Load(), startFails)
+				}
+				persisted, err := s.DesktopSettings()
+				if err != nil || persisted != settings {
+					t.Fatalf("desktop preferences changed: settings=%+v, err=%v", persisted, err)
+				}
+			})
+		}
+	}
+}
 
 func TestCompareSemver(t *testing.T) {
 	for _, tc := range []struct {

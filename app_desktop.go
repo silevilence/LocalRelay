@@ -60,7 +60,7 @@ func (a *App) updateDesktopSettings(update func(*store.DesktopSettings), updateA
 }
 
 // beforeClose preserves a running application in the notification area when
-// configured. The tray's explicit Exit item calls RequestQuit and bypasses it.
+// configured. Tray exit and update installation call RequestQuit to bypass it.
 func (a *App) beforeClose(ctx context.Context) bool {
 	settings, err := a.store.DesktopSettings()
 	if err != nil || !shouldInterceptClose(settings, a.quitting.Load()) {
@@ -101,8 +101,8 @@ func (a *App) ShowMainWindow() {
 	}
 }
 
-// RequestQuit is only used by the explicit tray command; normal window close
-// remains subject to the user's hide-on-close preference.
+// RequestQuit exits for explicit tray commands and update installation; normal
+// window close remains subject to the user's hide-on-close preference.
 func (a *App) RequestQuit() {
 	a.quitting.Store(true)
 	if a.ctx != nil {
