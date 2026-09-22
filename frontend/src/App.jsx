@@ -18,6 +18,7 @@ import {
 	ListAggregationMemberModels,
     ListProviderPresets,
     ListProviders,
+    SetProviderEnabled,
     RelayBaseURL,
     RelayPort,
 	SetHideOnClose,
@@ -66,6 +67,7 @@ const skippedUpdateKey = "localrelay.skippedUpdateVersion";
 
 function App() {
     const [providers, setProviders] = useState([]);
+    const [providerSaving, setProviderSaving] = useState("");
     const [providerPresets, setProviderPresets] = useState([]);
     const [models, setModels] = useState([]);
 	const [allModels, setAllModels] = useState([]);
@@ -207,7 +209,8 @@ function App() {
         setShowModelForm(false);
         setEditingModel(false);
         setModelDraft({...emptyModel, providerId: selectedProviderId});
-    }, [selectedProviderId, selectedProvider]);
+        // Toggling availability must not reset unsaved provider/model edits.
+    }, [selectedProviderId, selectedProvider?.name, selectedProvider?.type, selectedProvider?.baseUrl, selectedProvider?.apiKey, selectedProvider?.capabilityConfig]);
 
     async function refreshProviders() {
         try {
@@ -316,6 +319,25 @@ function App() {
             notify(success);
         } catch (error) {
             setMessage(`保存平台失败：${error}`);
+        }
+    }
+
+    async function toggleProvider(provider) {
+        if (providerSaving) return;
+        const enabled = !provider.enabled;
+        setProviderSaving(provider.id);
+        try {
+            await SetProviderEnabled(provider.id, enabled);
+            setProviders((items) => items.map((item) => item.id === provider.id ? {...item, enabled} : item));
+            const success = `平台「${provider.name}」已${enabled ? "启用" : "禁用"}。`;
+            setMessage(success);
+            notify(success);
+        } catch (error) {
+            const failure = `更新平台启用状态失败：${error}`;
+            setMessage(failure);
+            notify(failure);
+        } finally {
+            setProviderSaving("");
         }
     }
 
@@ -790,7 +812,7 @@ function App() {
                                     <Avatar name={provider.name || provider.id} />
                                     <span className="min-w-0 flex-1 truncate text-base font-semibold text-zinc-200">{provider.name}</span>
 									{provider.type === "aggregation" && <span className="rounded-full border border-sky-700/60 bg-sky-950/70 px-2 py-0.5 text-xs font-bold text-sky-300">聚合</span>}
-                                    <span className="rounded-full border border-green-700/60 bg-green-950/70 px-2 py-0.5 text-xs font-bold text-green-400">ON</span>
+                                    <span className={`rounded-full border px-2 py-0.5 text-xs font-bold ${provider.enabled ? "border-green-700/60 bg-green-950/70 text-green-400" : "border-zinc-700 bg-zinc-900 text-zinc-500"}`}>{provider.enabled ? "ON" : "OFF"}</span>
                                 </button>
                             ))}
                         </div>
@@ -814,14 +836,17 @@ function App() {
                                             {!isAddingProvider && activeProvider && <span className="rounded-full border border-zinc-700 px-2 py-0.5 text-xs text-zinc-400">ID: {activeProvider.id}</span>}
                                             {!isAddingProvider && activeProvider && <span className="rounded-full border border-zinc-700 px-2 py-0.5 text-xs text-zinc-400">{activeProvider.type}</span>}
                                         </div>
-                                        <button
-                                            className="h-8 w-14 rounded-full bg-emerald-500 p-1"
+                                        {activeProvider && <button
+                                            className={`h-8 w-14 shrink-0 rounded-full p-1 transition disabled:cursor-wait disabled:opacity-50 ${activeProvider.enabled ? "bg-emerald-500" : "bg-zinc-700"}`}
                                             type="button"
-                                            onClick={() => setMessage("启用开关暂未落库，后续接入路由开关时启用。")}
+                                            role="switch"
+                                            aria-checked={activeProvider.enabled}
+                                            disabled={Boolean(providerSaving)}
+                                            onClick={() => toggleProvider(activeProvider)}
                                             aria-label="平台启用状态"
                                         >
-                                            <span className="block h-6 w-6 translate-x-6 rounded-full bg-white" />
-                                        </button>
+                                            <span className={`block h-6 w-6 rounded-full bg-white transition-transform ${activeProvider.enabled ? "translate-x-6" : "translate-x-0"}`} />
+                                        </button>}
                                     </div>
 
                                     <ProviderPanel

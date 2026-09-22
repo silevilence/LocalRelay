@@ -586,7 +586,7 @@ func routeStatus(err error) int {
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		return http.StatusNotFound
-	case errors.Is(err, store.ErrInvalidModelID), errors.Is(err, store.ErrModelDisabled):
+	case errors.Is(err, store.ErrInvalidModelID), errors.Is(err, store.ErrModelDisabled), errors.Is(err, store.ErrProviderDisabled):
 		return http.StatusBadRequest
 	default:
 		return http.StatusInternalServerError
@@ -601,6 +601,8 @@ func routeCode(err error) string {
 		return "model_not_found"
 	case errors.Is(err, store.ErrModelDisabled):
 		return "model_disabled"
+	case errors.Is(err, store.ErrProviderDisabled):
+		return "provider_disabled"
 	default:
 		return "store_error"
 	}

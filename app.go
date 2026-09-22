@@ -173,6 +173,10 @@ func (a *App) DeleteProvider(id string) error {
 	return a.store.DeleteProvider(id)
 }
 
+func (a *App) SetProviderEnabled(id string, enabled bool) error {
+	return a.store.SetProviderEnabled(id, enabled)
+}
+
 func (a *App) ListModels(providerID string) ([]store.Model, error) {
 	return a.store.ListModels(providerID)
 }

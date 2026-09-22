@@ -57,6 +57,8 @@ export function SetHideOnMinimize(arg1:boolean):Promise<store.DesktopSettings>;
 
 export function SetLaunchAtLogin(arg1:boolean):Promise<store.DesktopSettings>;
 
+export function SetProviderEnabled(arg1:string,arg2:boolean):Promise<void>;
+
 export function SetRelayPort(arg1:number):Promise<number>;
 
 export function SetRelayServiceEnabled(arg1:boolean):Promise<boolean>;

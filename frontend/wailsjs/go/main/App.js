@@ -110,6 +110,10 @@ export function SetLaunchAtLogin(arg1) {
   return window['go']['main']['App']['SetLaunchAtLogin'](arg1);
 }
 
+export function SetProviderEnabled(arg1, arg2) {
+  return window['go']['main']['App']['SetProviderEnabled'](arg1, arg2);
+}
+
 export function SetRelayPort(arg1) {
   return window['go']['main']['App']['SetRelayPort'](arg1);
 }

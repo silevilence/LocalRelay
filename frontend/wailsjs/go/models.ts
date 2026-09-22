@@ -452,6 +452,7 @@ export namespace store {
 	    type: string;
 	    baseUrl: string;
 	    apiKey?: string;
+	    enabled: boolean;
 	    capabilityConfig: string;
 	    createdAt: string;
 	    updatedAt: string;
@@ -467,6 +468,7 @@ export namespace store {
 	        this.type = source["type"];
 	        this.baseUrl = source["baseUrl"];
 	        this.apiKey = source["apiKey"];
+	        this.enabled = source["enabled"];
 	        this.capabilityConfig = source["capabilityConfig"];
 	        this.createdAt = source["createdAt"];
 	        this.updatedAt = source["updatedAt"];
@@ -479,6 +481,7 @@ export namespace store {
 	    baseUrl: string;
 	    apiKey: string;
 	    capabilityConfig: string;
+	    enabled?: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new ProviderInput(source);
@@ -492,6 +495,7 @@ export namespace store {
 	        this.baseUrl = source["baseUrl"];
 	        this.apiKey = source["apiKey"];
 	        this.capabilityConfig = source["capabilityConfig"];
+	        this.enabled = source["enabled"];
 	    }
 	}
 	export class ProviderPreset {

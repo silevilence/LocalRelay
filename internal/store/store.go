@@ -24,9 +24,10 @@ import (
 )
 
 var (
-	ErrInvalidModelID = errors.New("model must use providerId/modelId")
-	ErrModelDisabled  = errors.New("model is disabled")
-	newAPIKey         = generateAPIKey
+	ErrInvalidModelID   = errors.New("model must use providerId/modelId")
+	ErrModelDisabled    = errors.New("model is disabled")
+	ErrProviderDisabled = errors.New("provider is disabled")
+	newAPIKey           = generateAPIKey
 )
 
 const NoAppName = "无应用"
@@ -67,6 +68,7 @@ type Provider struct {
 	Type    string `json:"type"`
 	BaseURL string `json:"baseUrl"`
 	APIKey  string `json:"apiKey,omitempty"`
+	Enabled bool   `json:"enabled"`
 	// CapabilityConfig records provider-specific protocol wrinkles such as
 	// reasoning_effort and thinking fields. Unknown provider quirks should live
 	// here instead of being scattered through relay conversion branches.
@@ -82,6 +84,8 @@ type ProviderInput struct {
 	BaseURL          string `json:"baseUrl"`
 	APIKey           string `json:"apiKey"`
 	CapabilityConfig string `json:"capabilityConfig"`
+	// Nil enables new providers and preserves the current state on edits.
+	Enabled *bool `json:"enabled,omitempty"`
 }
 
 type Model struct {
@@ -322,6 +326,7 @@ func (s *Store) applyMigrations() error {
 		{8, s.ensureAggregationSchema},
 		{9, s.migrateAggregationConfigKeys},
 		{10, s.seedOpencodeReasoningContentCapabilities},
+		{11, s.ensureProviderEnabledColumn},
 	}
 	for _, migration := range migrations {
 		var exists int
@@ -339,6 +344,18 @@ func (s *Store) applyMigrations() error {
 		}
 	}
 	return nil
+}
+
+func (s *Store) ensureProviderEnabledColumn() error {
+	has, err := s.hasColumn("providers", "enabled")
+	if err != nil {
+		return err
+	}
+	if has {
+		return nil
+	}
+	_, err = s.db.Exec(`ALTER TABLE providers ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1`)
+	return err
 }
 
 // seedOpencodeReasoningContentCapabilities upgrades the known models from the
@@ -634,7 +651,7 @@ func ValidateRelayPort(port int) error {
 }
 
 func (s *Store) ListProviders() ([]Provider, error) {
-	rows, err := s.db.Query(`SELECT id, name, type, base_url, api_key_encrypted, capability_config, created_at, updated_at FROM providers ORDER BY name`)
+	rows, err := s.db.Query(`SELECT id, name, type, base_url, api_key_encrypted, capability_config, enabled, created_at, updated_at FROM providers ORDER BY name`)
 	if err != nil {
 		return nil, err
 	}
@@ -644,7 +661,7 @@ func (s *Store) ListProviders() ([]Provider, error) {
 	for rows.Next() {
 		var p Provider
 		var encrypted string
-		if err := rows.Scan(&p.ID, &p.Name, &p.Type, &p.BaseURL, &encrypted, &p.CapabilityConfig, &p.CreatedAt, &p.UpdatedAt); err != nil {
+		if err := rows.Scan(&p.ID, &p.Name, &p.Type, &p.BaseURL, &encrypted, &p.CapabilityConfig, &p.Enabled, &p.CreatedAt, &p.UpdatedAt); err != nil {
 			return nil, err
 		}
 		p.APIKey, err = s.decrypt(encrypted)
@@ -668,14 +685,15 @@ func (s *Store) CreateProvider(in ProviderInput) (Provider, error) {
 	if err != nil {
 		return Provider{}, err
 	}
+	enabled := in.Enabled == nil || *in.Enabled
 	_, err = s.db.Exec(
-		`INSERT INTO providers(id, name, type, base_url, api_key_encrypted, capability_config, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		in.ID, in.Name, in.Type, in.BaseURL, encrypted, in.CapabilityConfig, now, now,
+		`INSERT INTO providers(id, name, type, base_url, api_key_encrypted, capability_config, enabled, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		in.ID, in.Name, in.Type, in.BaseURL, encrypted, in.CapabilityConfig, enabled, now, now,
 	)
 	if err != nil {
 		return Provider{}, err
 	}
-	return Provider{ID: in.ID, Name: in.Name, Type: in.Type, BaseURL: in.BaseURL, APIKey: in.APIKey, CapabilityConfig: in.CapabilityConfig, CreatedAt: now, UpdatedAt: now}, nil
+	return Provider{ID: in.ID, Name: in.Name, Type: in.Type, BaseURL: in.BaseURL, APIKey: in.APIKey, CapabilityConfig: in.CapabilityConfig, Enabled: enabled, CreatedAt: now, UpdatedAt: now}, nil
 }
 
 func (s *Store) UpdateProvider(in ProviderInput) (Provider, error) {
@@ -690,17 +708,37 @@ func (s *Store) UpdateProvider(in ProviderInput) (Provider, error) {
 	if err != nil {
 		return Provider{}, err
 	}
-	result, err := s.db.Exec(
-		`UPDATE providers SET name = ?, type = ?, base_url = ?, api_key_encrypted = ?, capability_config = ?, updated_at = ? WHERE id = ?`,
-		in.Name, in.Type, in.BaseURL, encrypted, in.CapabilityConfig, now, in.ID,
-	)
+	var enabled bool
+	var createdAt string
+	// COALESCE keeps an omitted state unchanged within the update itself, even
+	// when the independent enable switch is saved concurrently with a form.
+	err = s.db.QueryRow(
+		`UPDATE providers SET name = ?, type = ?, base_url = ?, api_key_encrypted = ?, capability_config = ?, enabled = COALESCE(?, enabled), updated_at = ? WHERE id = ? RETURNING enabled, created_at`,
+		in.Name, in.Type, in.BaseURL, encrypted, in.CapabilityConfig, in.Enabled, now, in.ID,
+	).Scan(&enabled, &createdAt)
 	if err != nil {
 		return Provider{}, err
 	}
-	if rows, _ := result.RowsAffected(); rows == 0 {
-		return Provider{}, sql.ErrNoRows
+	return Provider{ID: in.ID, Name: in.Name, Type: in.Type, BaseURL: in.BaseURL, APIKey: in.APIKey, CapabilityConfig: in.CapabilityConfig, Enabled: enabled, CreatedAt: createdAt, UpdatedAt: now}, nil
+}
+
+func (s *Store) SetProviderEnabled(id string, enabled bool) error {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return errors.New("provider id is required")
 	}
-	return Provider{ID: in.ID, Name: in.Name, Type: in.Type, BaseURL: in.BaseURL, APIKey: in.APIKey, CapabilityConfig: in.CapabilityConfig, UpdatedAt: now}, nil
+	result, err := s.db.Exec(`UPDATE providers SET enabled = ?, updated_at = ? WHERE id = ?`, enabled, timestamp(), id)
+	if err != nil {
+		return err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
 }
 
 func (s *Store) DeleteProvider(id string) error {
@@ -889,16 +927,19 @@ func (s *Store) GetRoutedModel(publicModel string) (RoutedModel, error) {
 	var routed RoutedModel
 	var encrypted string
 	err := s.db.QueryRow(`
-SELECT p.id, p.name, p.type, p.base_url, p.api_key_encrypted, p.capability_config, p.created_at, p.updated_at,
+SELECT p.id, p.name, p.type, p.base_url, p.api_key_encrypted, p.capability_config, p.enabled, p.created_at, p.updated_at,
        m.id, m.provider_id, m.name, m.capabilities, m.context_length, m.max_tokens, m.enabled, m.created_at, m.updated_at
 FROM models m
 JOIN providers p ON p.id = m.provider_id
 WHERE m.provider_id = ? AND m.id = ?`, providerID, modelID).Scan(
-		&routed.Provider.ID, &routed.Provider.Name, &routed.Provider.Type, &routed.Provider.BaseURL, &encrypted, &routed.Provider.CapabilityConfig, &routed.Provider.CreatedAt, &routed.Provider.UpdatedAt,
+		&routed.Provider.ID, &routed.Provider.Name, &routed.Provider.Type, &routed.Provider.BaseURL, &encrypted, &routed.Provider.CapabilityConfig, &routed.Provider.Enabled, &routed.Provider.CreatedAt, &routed.Provider.UpdatedAt,
 		&routed.Model.ID, &routed.Model.ProviderID, &routed.Model.Name, &routed.Model.Capabilities, &routed.Model.ContextLength, &routed.Model.MaxTokens, &routed.Model.Enabled, &routed.Model.CreatedAt, &routed.Model.UpdatedAt,
 	)
 	if err != nil {
 		return RoutedModel{}, err
+	}
+	if !routed.Provider.Enabled {
+		return RoutedModel{}, ErrProviderDisabled
 	}
 	routed.Provider.APIKey, err = s.decrypt(encrypted)
 	if err != nil {
@@ -915,7 +956,7 @@ func (s *Store) ListEnabledModels() ([]Model, error) {
 SELECT m.id, m.provider_id, m.name, m.capabilities, m.context_length, m.max_tokens, m.enabled, m.created_at, m.updated_at
 FROM models m
 JOIN providers p ON p.id = m.provider_id
-WHERE m.enabled = 1
+WHERE m.enabled = 1 AND p.enabled = 1
 ORDER BY m.provider_id, m.name`)
 	if err != nil {
 		return nil, err

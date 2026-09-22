@@ -1,7 +1,9 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -13,6 +15,36 @@ import (
 	"localrelay/internal/relay"
 	"localrelay/internal/store"
 )
+
+func TestSetProviderEnabledBinding(t *testing.T) {
+	s, err := store.Open(filepath.Join(t.TempDir(), "localrelay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	app := &App{store: s}
+	input := store.ProviderInput{ID: "p", Name: "P", Type: "openai", BaseURL: "https://example.test"}
+	if _, err := app.CreateProvider(input); err != nil {
+		t.Fatal(err)
+	}
+	for _, enabled := range []bool{false, true} {
+		if err := app.SetProviderEnabled("p", enabled); err != nil {
+			t.Fatal(err)
+		}
+		// Provider forms omit enabled; saving one must retain the switch state.
+		updated, err := app.UpdateProvider(input)
+		if err != nil || updated.Enabled != enabled {
+			t.Fatalf("updated=%+v err=%v", updated, err)
+		}
+		providers, err := app.ListProviders()
+		if err != nil || len(providers) != 1 || providers[0].Enabled != enabled {
+			t.Fatalf("providers=%+v err=%v", providers, err)
+		}
+	}
+	if err := app.SetProviderEnabled("missing", false); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("missing provider: %v", err)
+	}
+}
 
 func TestProviderModelTestSendsChatRequest(t *testing.T) {
 	var upstreamModel, auth string
