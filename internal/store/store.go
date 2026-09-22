@@ -685,7 +685,7 @@ func (s *Store) CreateProvider(in ProviderInput) (Provider, error) {
 	if err != nil {
 		return Provider{}, err
 	}
-	enabled := in.Enabled == nil || *in.Enabled
+	enabled := enabledOrTrue(in.Enabled)
 	_, err = s.db.Exec(
 		`INSERT INTO providers(id, name, type, base_url, api_key_encrypted, capability_config, enabled, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		in.ID, in.Name, in.Type, in.BaseURL, encrypted, in.CapabilityConfig, enabled, now, now,
@@ -837,7 +837,7 @@ func (s *Store) CreateModel(in ModelInput) (Model, error) {
 		return Model{}, errors.New("only aggregation providers accept aggregation configuration")
 	}
 	now := timestamp()
-	enabled := inputEnabled(in)
+	enabled := enabledOrTrue(in.Enabled)
 	tx, err := s.db.Begin()
 	if err != nil {
 		return Model{}, err
@@ -881,7 +881,7 @@ func (s *Store) UpdateModel(in ModelInput) (Model, error) {
 		return Model{}, errors.New("only aggregation providers accept aggregation configuration")
 	}
 	now := timestamp()
-	enabled := inputEnabled(in)
+	enabled := enabledOrTrue(in.Enabled)
 	tx, err := s.db.Begin()
 	if err != nil {
 		return Model{}, err
@@ -1592,8 +1592,10 @@ func withDefaultCapabilityConfig(in ProviderInput) ProviderInput {
 	return in
 }
 
-func inputEnabled(in ModelInput) bool {
-	return in.Enabled == nil || *in.Enabled
+// enabledOrTrue applies the default for new providers and model inputs.
+// Provider edits instead preserve an omitted state in SQL via COALESCE.
+func enabledOrTrue(enabled *bool) bool {
+	return enabled == nil || *enabled
 }
 
 func nullable(value string) any {

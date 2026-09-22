@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -1304,13 +1305,30 @@ func TestRequestTooLargeAndModelsStoreError(t *testing.T) {
 	}
 }
 
+func TestRouteError(t *testing.T) {
+	for _, tc := range []struct {
+		err    error
+		status int
+		code   string
+	}{
+		{store.ErrInvalidModelID, http.StatusBadRequest, "invalid_model_id"},
+		{sql.ErrNoRows, http.StatusNotFound, "model_not_found"},
+		{store.ErrModelDisabled, http.StatusBadRequest, "model_disabled"},
+		{store.ErrProviderDisabled, http.StatusBadRequest, "provider_disabled"},
+		{errors.New("database unavailable"), http.StatusInternalServerError, "store_error"},
+	} {
+		t.Run(tc.code, func(t *testing.T) {
+			for _, err := range []error{tc.err, fmt.Errorf("route failed: %w", tc.err)} {
+				status, code := routeError(err)
+				if status != tc.status || code != tc.code {
+					t.Fatalf("routeError(%v) = (%d, %s), want (%d, %s)", err, status, code, tc.status, tc.code)
+				}
+			}
+		})
+	}
+}
+
 func TestHelperBranches(t *testing.T) {
-	if routeStatus(errors.New("boom")) != http.StatusInternalServerError {
-		t.Fatal("expected default route status")
-	}
-	if routeCode(errors.New("boom")) != "store_error" {
-		t.Fatal("expected default route code")
-	}
 	if contentType("") != "application/json" {
 		t.Fatal("expected default content type")
 	}
@@ -1359,12 +1377,17 @@ func openRelayStore(t *testing.T) *store.Store {
 
 func errorCode(t *testing.T, resp *http.Response) string {
 	t.Helper()
+	return readErrorCode(t, resp.Body)
+}
+
+func readErrorCode(t *testing.T, body io.Reader) string {
+	t.Helper()
 	var out struct {
 		Error struct {
 			Code string `json:"code"`
 		} `json:"error"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+	if err := json.NewDecoder(body).Decode(&out); err != nil {
 		t.Fatal(err)
 	}
 	return out.Error.Code

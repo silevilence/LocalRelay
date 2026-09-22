@@ -25,6 +25,16 @@ func TestProviderEnabledDefaultsAndEdits(t *testing.T) {
 			if created.Enabled != (initial != "disabled") {
 				t.Fatalf("created enabled = %v", created.Enabled)
 			}
+			model, err := s.CreateModel(ModelInput{ID: "m", ProviderID: in.ID, Name: "Model", Enabled: in.Enabled})
+			if err != nil || model.Enabled != created.Enabled {
+				t.Fatalf("shared creation default: model=%+v err=%v", model, err)
+			}
+			// Model edits retain their existing nil => enabled contract; provider
+			// edits below deliberately have nil => preserve semantics instead.
+			model, err = s.UpdateModel(ModelInput{ID: "m", ProviderID: in.ID, Name: "Edited model"})
+			if err != nil || !model.Enabled {
+				t.Fatalf("omitted model state: model=%+v err=%v", model, err)
+			}
 			in.Enabled = nil
 			in.Name = "edited"
 			updated, err := s.UpdateProvider(in)

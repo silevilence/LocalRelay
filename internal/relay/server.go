@@ -196,9 +196,10 @@ func (s *Server) handleClientRequest(w http.ResponseWriter, r *http.Request, pro
 	log.Stream = incoming.stream
 	routed, err := s.store.GetRoutedModel(incoming.model)
 	if err != nil {
-		status = routeStatus(err)
+		var code string
+		status, code = routeError(err)
 		log.Error = err.Error()
-		writeError(w, status, routeCode(err), err.Error())
+		writeError(w, status, code, err.Error())
 		return
 	}
 	if routed.Provider.Type == store.AggregationProviderType {
@@ -582,29 +583,18 @@ func chatURL(base string) string {
 	return providerURL(base, capabilities.ProtocolOpenAIChat, "", false)
 }
 
-func routeStatus(err error) int {
-	switch {
-	case errors.Is(err, sql.ErrNoRows):
-		return http.StatusNotFound
-	case errors.Is(err, store.ErrInvalidModelID), errors.Is(err, store.ErrModelDisabled), errors.Is(err, store.ErrProviderDisabled):
-		return http.StatusBadRequest
-	default:
-		return http.StatusInternalServerError
-	}
-}
-
-func routeCode(err error) string {
+func routeError(err error) (int, string) {
 	switch {
 	case errors.Is(err, store.ErrInvalidModelID):
-		return "invalid_model_id"
+		return http.StatusBadRequest, "invalid_model_id"
 	case errors.Is(err, sql.ErrNoRows):
-		return "model_not_found"
+		return http.StatusNotFound, "model_not_found"
 	case errors.Is(err, store.ErrModelDisabled):
-		return "model_disabled"
+		return http.StatusBadRequest, "model_disabled"
 	case errors.Is(err, store.ErrProviderDisabled):
-		return "provider_disabled"
+		return http.StatusBadRequest, "provider_disabled"
 	default:
-		return "store_error"
+		return http.StatusInternalServerError, "store_error"
 	}
 }
 

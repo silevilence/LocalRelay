@@ -48,7 +48,7 @@ func TestDisabledProviderAcrossInboundProtocols(t *testing.T) {
 		} {
 			t.Run(fmt.Sprintf("%s/stream=%t", tc.name, stream), func(t *testing.T) {
 				status, body := providerRequest(t, server.URL+tc.path, tc.body)
-				if status != http.StatusBadRequest || !strings.Contains(body, `"code":"provider_disabled"`) || !strings.Contains(body, "provider is disabled") {
+				if status != http.StatusBadRequest || readErrorCode(t, strings.NewReader(body)) != "provider_disabled" || !strings.Contains(body, "provider is disabled") {
 					t.Fatalf("status=%d body=%s", status, body)
 				}
 			})
@@ -195,7 +195,7 @@ func TestAggregationSkipsDisabledProviders(t *testing.T) {
 					t.Fatal(err)
 				}
 				status, response = providerRequest(t, server.URL+"/v1/chat/completions", body)
-				if status != http.StatusBadRequest || !strings.Contains(response, `"code":"provider_disabled"`) || firstCalls.Load() != 1 || secondCalls.Load() != 1 {
+				if status != http.StatusBadRequest || readErrorCode(t, strings.NewReader(response)) != "provider_disabled" || firstCalls.Load() != 1 || secondCalls.Load() != 1 {
 					t.Fatalf("disabled aggregate: status=%d response=%s calls=%d/%d", status, response, firstCalls.Load(), secondCalls.Load())
 				}
 			})

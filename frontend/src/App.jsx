@@ -67,7 +67,7 @@ const skippedUpdateKey = "localrelay.skippedUpdateVersion";
 
 function App() {
     const [providers, setProviders] = useState([]);
-    const [providerSaving, setProviderSaving] = useState("");
+    const [providerSavingId, setProviderSavingId] = useState("");
     const [providerPresets, setProviderPresets] = useState([]);
     const [models, setModels] = useState([]);
 	const [allModels, setAllModels] = useState([]);
@@ -129,6 +129,10 @@ function App() {
         () => providers.find((provider) => provider.id === selectedProviderId),
         [providers, selectedProviderId],
     );
+
+    // Depend on the form projection so new editable fields automatically sync,
+    // while availability/timestamp changes preserve unsaved provider/model edits.
+    const selectedProviderDraftJSON = selectedProvider ? JSON.stringify(providerToDraft(selectedProvider)) : null;
 
     const visibleProviders = useMemo(() => {
         const needle = search.trim().toLowerCase();
@@ -200,8 +204,8 @@ function App() {
     }, [statsFilter.from, statsFilter.to, statsFilter.providerId, statsFilter.modelId]);
 
     useEffect(() => {
-        if (selectedProvider) {
-            setProviderDraft(providerToDraft(selectedProvider));
+        if (selectedProviderDraftJSON) {
+            setProviderDraft(JSON.parse(selectedProviderDraftJSON));
             setIsAddingProvider(false);
             setSelectedPresetId("");
         }
@@ -209,8 +213,7 @@ function App() {
         setShowModelForm(false);
         setEditingModel(false);
         setModelDraft({...emptyModel, providerId: selectedProviderId});
-        // Toggling availability must not reset unsaved provider/model edits.
-    }, [selectedProviderId, selectedProvider?.name, selectedProvider?.type, selectedProvider?.baseUrl, selectedProvider?.apiKey, selectedProvider?.capabilityConfig]);
+    }, [selectedProviderId, selectedProviderDraftJSON]);
 
     async function refreshProviders() {
         try {
@@ -323,9 +326,9 @@ function App() {
     }
 
     async function toggleProvider(provider) {
-        if (providerSaving) return;
+        if (providerSavingId) return;
         const enabled = !provider.enabled;
-        setProviderSaving(provider.id);
+        setProviderSavingId(provider.id);
         try {
             await SetProviderEnabled(provider.id, enabled);
             setProviders((items) => items.map((item) => item.id === provider.id ? {...item, enabled} : item));
@@ -337,7 +340,7 @@ function App() {
             setMessage(failure);
             notify(failure);
         } finally {
-            setProviderSaving("");
+            setProviderSavingId("");
         }
     }
 
@@ -799,21 +802,29 @@ function App() {
 
                         <div className="min-h-0 flex-1 space-y-1 overflow-y-auto pr-1">
                             {visibleProviders.map((provider) => (
-                                <button
+                                <div
                                     key={provider.id}
                                     className={`flex w-full items-center gap-3 rounded-2xl px-3 py-2.5 text-left transition ${
                                         provider.id === selectedProviderId && !isAddingProvider
                                             ? "border border-zinc-700 bg-zinc-800/70"
                                             : "hover:bg-zinc-900"
                                     }`}
-                                    type="button"
-                                    onClick={() => setSelectedProviderId(provider.id)}
                                 >
-                                    <Avatar name={provider.name || provider.id} />
-                                    <span className="min-w-0 flex-1 truncate text-base font-semibold text-zinc-200">{provider.name}</span>
-									{provider.type === "aggregation" && <span className="rounded-full border border-sky-700/60 bg-sky-950/70 px-2 py-0.5 text-xs font-bold text-sky-300">聚合</span>}
-                                    <span className={`rounded-full border px-2 py-0.5 text-xs font-bold ${provider.enabled ? "border-green-700/60 bg-green-950/70 text-green-400" : "border-zinc-700 bg-zinc-900 text-zinc-500"}`}>{provider.enabled ? "ON" : "OFF"}</span>
-                                </button>
+                                    <button className="flex min-w-0 flex-1 items-center gap-3 text-left" type="button" onClick={() => setSelectedProviderId(provider.id)}>
+                                        <Avatar name={provider.name || provider.id} />
+                                        <span className="min-w-0 flex-1 truncate text-base font-semibold text-zinc-200">{provider.name}</span>
+                                        {provider.type === "aggregation" && <span className="rounded-full border border-sky-700/60 bg-sky-950/70 px-2 py-0.5 text-xs font-bold text-sky-300">聚合</span>}
+                                    </button>
+                                    <button
+                                        className={`shrink-0 rounded-full border px-2 py-0.5 text-xs font-bold disabled:cursor-wait disabled:opacity-50 ${provider.enabled ? "border-green-700/60 bg-green-950/70 text-green-400" : "border-zinc-700 bg-zinc-900 text-zinc-500"}`}
+                                        type="button"
+                                        role="switch"
+                                        aria-label={`平台「${provider.name}」启用状态`}
+                                        aria-checked={provider.enabled}
+                                        disabled={Boolean(providerSavingId)}
+                                        onClick={() => toggleProvider(provider)}
+                                    >{provider.enabled ? "ON" : "OFF"}</button>
+                                </div>
                             ))}
                         </div>
 
@@ -841,7 +852,7 @@ function App() {
                                             type="button"
                                             role="switch"
                                             aria-checked={activeProvider.enabled}
-                                            disabled={Boolean(providerSaving)}
+                                            disabled={Boolean(providerSavingId)}
                                             onClick={() => toggleProvider(activeProvider)}
                                             aria-label="平台启用状态"
                                         >
