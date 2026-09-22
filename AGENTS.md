@@ -28,12 +28,29 @@
 - 排除依据：请求体经 IR 转换后由 `json.Marshal` 重新序列化为未压缩 JSON，入站 `Content-Encoding` / `Expect` / `Content-Length` 不再描述该请求体；转发客户端 `Accept-Encoding` 会关闭 Go Transport 的自动解压，破坏压缩 JSON/SSE 的解析。新增敏感头时必须同步加入排除清单。
 - 上游请求的 `Content-Type: application/json` 与认证头由 `postProvider` **无条件重写**（Anthropic 另写 `Anthropic-Version: 2023-06-01`）；未配置上游 API Key 时同样先删除入站凭据，禁止把客户端凭据转发给第三方上游。
 
+### 供应商启用开关与路由错误
+
+- `providers` 表含 `enabled` 列（schema 迁移 v11 `ensureProviderEnabledColumn`，`ALTER TABLE ... NOT NULL DEFAULT 1`，历史数据视为启用）。`Provider.Enabled` 是该状态的唯一读出口，`ListProviders` / `GetRoutedModel` 的查询列必须同步携带该字段；迁移必须走版本化迁移表，禁止在业务路径里 `ALTER TABLE`。
+- 开关的独立翻转走 `Store.SetProviderEnabled(id, enabled)`（Wails 绑定 `App.SetProviderEnabled`，前端列表徽标与详情页开关都调用它），它会刷新 `updated_at`，id 不存在时返回 `sql.ErrNoRows`。
+- `ProviderInput.Enabled` 是 `*bool`，**nil 语义为"不改变"**：新建时经 `enabledOrTrue` 默认启用，编辑时由 `UPDATE ... enabled = COALESCE(?, enabled)` 在 SQL 内保留原状态，避免"表单保存"与"开关翻转"并发时相互覆盖。前端平台编辑表单（`providerToDraft`）刻意不回传该字段，新增表单字段时应保持这一约定。
+- 路由错误映射集中在 `internal/relay/server.go` 的 `routeError`（同时给状态码与错误码，二者不得分散在两个函数里各写一遍 switch）：供应商被停用时 `GetRoutedModel` 返回 `store.ErrProviderDisabled` → 400 `provider_disabled`；模型 id 非法 / 模型停用 → 400；模型不存在 → 404 `model_not_found`。四种入站协议与流式/非流式共用该路径，被停用平台不会收到任何上游请求。
+- `/v1/models` 由 `ListEnabledModels` 提供，条件为 `m.enabled = 1 AND p.enabled = 1`，因此停用平台会隐藏其全部模型。
+- 聚合：成员解析阶段 `GetRoutedModel` 失败（含平台被停用）只记入 `log.AggAttempts`，不得进入候选集合，也不得写冷却期；候选为空时返回「聚合没有可用成员」（502）。聚合 Provider 自身被停用时同样返回 `provider_disabled`。
+- 前端：列表徽标与详情页开关反映真实状态，翻转期间所有开关按 `providerSavingId` 置为 disabled 以防并发；平台表单草稿的同步依赖 `providerToDraft` 投影出的 JSON 而不是 `provider` 对象，后台刷新（启用状态、`updated_at` 变化）不会覆盖未保存的表单内容。
+
+### 流式超时语义
+
+- 流式上游请求必须走 `internal/relay/timeout.go` 的 `doStreamRequest`，**禁止**直接用 `s.client.Do`：`http.Client.Timeout` 覆盖响应体读取，会把健康的长 SSE 流在固定总时限处截断。
+- 语义：同一份 2 分钟预算先用于等待上游响应头，收到响应头后重置为读空闲超时；`streamTimeoutBody.Read` 读到任意字节（含 SSE 注释心跳与尚未拼完的事件）都刷新计时。非流式请求保持 `client.Timeout` 的 2 分钟总时限。
+- 超时经 `context.WithCancelCause` 记录原因（`upstream response timeout` / `upstream stream idle timeout`），请求结束必须 `finish()` 释放计时器与子 context，避免把正常 EOF 记成 `context canceled`；客户端取消与聚合主备的成员尝试时限仍由 request context 生效。
+
 ### 桌面集成与平台分层
 
 - 桌面集成（系统托盘、开机启动、窗口最小化/关闭隐藏、启动隐藏、网关服务启停）通过 **Go build tag** 分平台实现：`desktop_windows.go`（`//go:build windows`）承载 Windows 完整实现，`desktop_other.go`（`//go:build !windows`）提供同名方法的空实现/不支持错误，确保非 Windows 构建不崩溃。新增平台集成能力必须同时补齐 `desktop_other.go` 的占位，禁止让非目标平台编译失败。
 - 桌面相关开关（`GatewayEnabled` / `HideOnMinimize` / `HideOnClose` / `LaunchAtLogin` / `StartMinimized`）持久化在 `app_settings` 表，统一通过 `internal/store.DesktopSettings` 读写；新增桌面开关应扩展该结构体并补默认值，不要新建独立的存储表。前端绑定集中在 `app_desktop.go`。
 - 网关服务启停（`SetRelayServiceEnabled`）只关闭 `http.Server` 监听，**不销毁** `relay.Server` 实例与其已加载的存储，便于再次开启时无需重新初始化；关闭走 `Shutdown`（3 秒超时）后再 `Close` 兜底，保证持久化的禁用态与实际监听态一致。
 - 系统托盘菜单项（如「暂停/恢复网关服务」）必须与设置页开关**双向同步**：托盘操作翻转状态后通过 `runtime.EventsEmit` 通知前端，前端翻转后调用 `updateTrayGatewayMenu` 同步托盘菜单文字。
+- 更新安装（`InstallUpdate` → `launchUpdateInstaller`）启动安装包后必须调用 `App.RequestQuit()`（置 `quitting` 标志后再 `runtime.Quit`），**不得**直接用 `wailsruntime.Quit`：它同样触发 `beforeClose`，会被「关闭时隐藏到托盘」拦截，导致安装程序一直等待本进程退出。安装包启动失败时保持应用运行，不得退出。
 
 ## 技术栈约束
 
@@ -61,7 +78,7 @@
 
 ### Go 后端
 
-- 遵循标准 Go 项目约定，使用 `gofmt` / `goimports` 格式化，提交前必须通过 `go vet`。
+- 遵循标准 Go 项目约定，使用 `gofmt` / `goimports` 格式化，提交前必须通过 `go vet`。本地全量验证依次为 `gofmt`、`go vet ./...`、`go test ./...`，测试文件与被测代码同目录。
 - 错误处理使用显式 `error` 返回，禁止吞掉错误或用 panic 代替正常错误流程（除非是不可恢复的初始化错误）。
 - 涉及协议字段映射的结构体，字段命名与 JSON tag 需清晰标注对应的外部协议字段，避免"神秘字段"。
 - 各协议适配器应实现统一接口（IR ↔ 上游协议的 `ToProviderRequest` / `ParseResponse` / `FromIRResponse*` / `WriteStreamEvent` 等），新增供应商类型或预设时优先通过新增配置/实现文件完成，不修改已有适配器核心逻辑。

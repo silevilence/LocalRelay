@@ -8,7 +8,7 @@ LocalRelay 的 IR 以消息数组为中心：外部协议先转成 `ir.Request`�
 - `Response`：非流式响应骨架，包含一个或多个 `Choice` 与 token `Usage`。
 - `Message`：`system` / `user` / `assistant` / `tool` 四类角色。
 - `ContentBlock`：用 `type` 区分文本、图片、工具调用、工具结果、思考内容。
-- `Tool`：目前对应 OpenAI Chat 的 function tool。
+- `Tool`：函数工具定义，结构沿用 OpenAI 的 function tool 形状，各协议出站时从该结构转换。
 
 Go struct 位于 `internal/ir`。
 
@@ -80,11 +80,11 @@ Go struct 位于 `internal/ir`。
 
 当前已实现：
 
-- OpenAI Chat 请求体 → IR。
-- IR → OpenAI-compatible Chat 请求体，先支持 `openai` 和 `deepseek`。
-- OpenAI Chat SSE chunk → 流式 IR 事件 → OpenAI Chat SSE chunk。
+- 入站解析：OpenAI Chat Completions、Anthropic Messages、OpenAI Responses、Google Gemini 四种协议 → IR，流式与非流式分别实现。
+- 出站转换：IR → 四种协议的上游请求体；目标协议与差异字段由供应商能力配置（`internal/capabilities`）决定，转换逻辑不按供应商硬编码分支。
+- 出站响应：上游各协议的响应体 / SSE 事件 → IR → 对外的目标协议响应体 / SSE 事件。
 
-`thinking` block 在 OpenAI-compatible 出站请求中没有通用字段，会被有意丢弃；未来供应商能力配置落地后再接入有私有字段支持的供应商。
+`thinking` block 的落点在各协议不同：Anthropic 用原生 `thinking` block（含 signature），Gemini 用 `thought: true` 的 part（含 thoughtSignature），OpenAI Responses 用 `reasoning` 输出项；OpenAI Chat 没有通用字段，仅在能力配置声明 `thinking.requestMessageField` / `thinking.responseContentField` 为 `reasoning_content` 时映射到该字段，否则在出站时有意丢弃思考内容，避免上游拒绝或客户端误读。工具调用历史与思考内容的兼容策略（`requireAssistantContent` / `requireReasoningContent`、模型级 `allowThinkingDowngrade`）同样落在能力配置层。
 
 OpenAI-compatible assistant 消息携带 `tool_calls` 时，`content` 只能是 `null` 或字符串；如果 IR 里同一条 assistant 消息混入图片块，出站映射会丢弃图片块并保留文本与工具调用，避免生成上游拒绝的请求。
 
