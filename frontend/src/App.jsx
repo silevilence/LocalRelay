@@ -1,5 +1,7 @@
 import {useEffect, useMemo, useRef, useState} from 'react';
 import * as echarts from 'echarts';
+import AccessAddresses from './AccessAddresses';
+import {GitHubProxyPage, GitHubProxySettings} from './GitHubProxy';
 import {
     AppInfo,
     CallLogs,
@@ -675,10 +677,11 @@ function App() {
                     <h1 className="text-lg font-bold">LocalRelay</h1>
                     <p className="text-xs text-zinc-500">本地模型网关配置</p>
                 </div>
-                <div className="grid w-[34rem] grid-cols-4 gap-2">
+                <div className="grid w-[42rem] max-w-[70vw] grid-cols-5 gap-2">
                     <NavButton active={page === "providers"} onClick={() => setPage("providers")}>提供商</NavButton>
                     <NavButton active={page === "apikeys"} onClick={() => setPage("apikeys")}>API Key</NavButton>
                     <NavButton active={page === "stats"} onClick={() => setPage("stats")}>Token 统计</NavButton>
+                    <NavButton active={page === "github"} onClick={() => setPage("github")}>GitHub 代理</NavButton>
                     <NavButton active={page === "settings"} onClick={() => setPage("settings")}>设置</NavButton>
                 </div>
             </header>
@@ -709,6 +712,8 @@ function App() {
                         <StatusMessage message={message} providerCount={providerCount} />
                     </div>
                 </main>
+            ) : page === "github" ? (
+                <GitHubProxyPage onCopy={copyText} onSettings={() => setPage("settings")} />
             ) : page === "settings" ? (
                 <main className="min-h-0 flex-1 overflow-y-auto px-7 py-5">
                     <div className="mx-auto max-w-4xl">
@@ -728,6 +733,7 @@ function App() {
                             onRefreshAddresses={refreshLocalAddresses}
                             onCopy={copyText}
                         />
+                        <GitHubProxySettings />
                         <UpdatePanel
                             appInfo={appInfo}
                             updateInfo={updateInfo}
@@ -1418,25 +1424,7 @@ function RelaySettingsPanel({port, saving, settings, addresses, settingSaving, o
                     {saving ? "正在保存…" : settings.gatewayEnabled ? "保存并重启网关" : "保存端口"}
                 </button>
             </form>
-            <div className="mt-5 rounded-xl border border-zinc-800 bg-black/20 p-4">
-                <div className="flex flex-wrap items-center justify-between gap-3">
-                    <div>
-                        <h3 className="font-bold text-zinc-200">本机访问地址</h3>
-                        <p className="mt-1 text-xs text-zinc-500">端口取当前设置；虚拟网卡也会列出。请确保 Windows 防火墙允许对应入站连接。</p>
-                    </div>
-                    <button className="rounded-lg border border-zinc-700 px-3 py-1.5 text-sm text-zinc-300 hover:bg-zinc-900" type="button" onClick={onRefreshAddresses}>刷新</button>
-                </div>
-                <div className="mt-3 divide-y divide-zinc-800 overflow-hidden rounded-lg border border-zinc-800">
-                    {addresses.map((address) => (
-                        <div key={`${address.url}-${address.source}`} className="flex flex-wrap items-center gap-2 bg-zinc-950/40 px-3 py-2.5 text-sm">
-                            <code className="min-w-0 flex-1 break-all font-mono text-zinc-200">{address.url}</code>
-                            <span className="text-xs text-zinc-500">({address.source})</span>
-                            <button className="rounded-lg border border-zinc-700 px-2.5 py-1 text-xs text-zinc-300 hover:bg-zinc-900" type="button" onClick={() => onCopy(address.url)}>⧉ 复制</button>
-                        </div>
-                    ))}
-                    {!addresses.length && <div className="px-3 py-3 text-sm text-zinc-500">正在读取本机网络地址…</div>}
-                </div>
-            </div>
+            <AccessAddresses addresses={addresses} onRefresh={onRefreshAddresses} onCopy={onCopy} />
             <div className="mt-5 border-t border-zinc-800 pt-5">
                 <h3 className="font-bold text-zinc-200">桌面行为（Windows）</h3>
                 <SettingSwitch label="最小化时隐藏到系统托盘" description="开启后点击窗口最小化按钮会隐藏窗口，托盘图标会持续显示。" checked={settings.hideOnMinimize} disabled={settingSaving === "hideOnMinimize"} onChange={onHideOnMinimizeChange} />

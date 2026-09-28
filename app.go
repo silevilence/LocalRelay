@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"localrelay/internal/capabilities"
+	"localrelay/internal/githubproxy"
 	"localrelay/internal/ir"
 	"localrelay/internal/protocol/anthropic"
 	"localrelay/internal/protocol/gemini"
@@ -47,6 +48,10 @@ type App struct {
 	listenRelay     func(port int) (net.Listener, error)
 	startMinimized  bool
 	quitting        atomic.Bool
+	githubMu        sync.Mutex
+	githubServer    *http.Server
+	githubHandler   atomic.Pointer[githubproxy.Server]
+	githubError     string
 }
 
 type trayMenuItem interface {
@@ -81,6 +86,7 @@ func (a *App) startup(ctx context.Context) {
 			panic(fmt.Errorf("start relay gateway: %w", err))
 		}
 	}
+	a.startGitHubProxy()
 	a.startSystemTray()
 	a.startWindowStateWatcher()
 	a.startMinimized = shouldStartMinimized(settings)
@@ -133,6 +139,9 @@ func (a *App) serveRelay(listener net.Listener) {
 }
 
 func (a *App) shutdown(_ context.Context) {
+	a.githubMu.Lock()
+	a.stopGitHubLocked()
+	a.githubMu.Unlock()
 	if a.watchCancel != nil {
 		a.watchCancel()
 	}
@@ -393,6 +402,10 @@ func (a *App) LocalAccessAddresses() ([]LocalAddress, error) {
 	if err != nil {
 		return nil, err
 	}
+	return localAccessAddresses(port)
+}
+
+func localAccessAddresses(port int) ([]LocalAddress, error) {
 	addresses := []LocalAddress{{
 		URL:    fmt.Sprintf("http://127.0.0.1:%d", port),
 		Source: "本地回环",

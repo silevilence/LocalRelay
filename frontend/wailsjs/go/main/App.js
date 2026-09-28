@@ -46,6 +46,10 @@ export function FetchProviderModels(arg1) {
   return window['go']['main']['App']['FetchProviderModels'](arg1);
 }
 
+export function GitHubProxyStatus() {
+  return window['go']['main']['App']['GitHubProxyStatus']();
+}
+
 export function Greet(arg1) {
   return window['go']['main']['App']['Greet'](arg1);
 }
@@ -96,6 +100,14 @@ export function RelayServiceEnabled() {
 
 export function RequestQuit() {
   return window['go']['main']['App']['RequestQuit']();
+}
+
+export function SaveGitHubProxyConfig(arg1) {
+  return window['go']['main']['App']['SaveGitHubProxyConfig'](arg1);
+}
+
+export function SetGitHubProxyEnabled(arg1) {
+  return window['go']['main']['App']['SetGitHubProxyEnabled'](arg1);
 }
 
 export function SetHideOnClose(arg1) {
