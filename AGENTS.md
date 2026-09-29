@@ -44,6 +44,16 @@
 - 语义：同一份 2 分钟预算先用于等待上游响应头，收到响应头后重置为读空闲超时；`streamTimeoutBody.Read` 读到任意字节（含 SSE 注释心跳与尚未拼完的事件）都刷新计时。非流式请求保持 `client.Timeout` 的 2 分钟总时限。
 - 超时经 `context.WithCancelCause` 记录原因（`upstream response timeout` / `upstream stream idle timeout`），请求结束必须 `finish()` 释放计时器与子 context，避免把正常 EOF 记成 `context canceled`；客户端取消与聚合主备的成员尝试时限仍由 request context 生效。
 
+### 资源代理（GitHub + npm）
+
+- `internal/githubproxy` 是与 LLM 网关完全独立的只读资源转发服务：历史包名、`githubproxy.Config` 与 `app_github.go` 的绑定名（`SaveGitHubProxyConfig` / `SetGitHubProxyEnabled` / `GitHubProxyStatus`）**保留不变**，升级不得破坏已持久化设置与前端绑定；但对外名称统一为「资源代理」，前端页面与设置分组只写「资源代理」（组件仍在 `frontend/src/GitHubProxy.jsx`）。
+- 同一端口同时提供 `/github/` 与 `/npm/`：`Server` 用 `resource` 策略（`target` + `redirect`）承载「目标校验与重定向校验」，`New` 同时构建 GitHub 策略与 npm 策略（npm 是嵌套的独立 `*Server`，即 `s.npm`）；二者共享传输、重试与流式实现，但各自持有客户端与粘性缓存，**禁止**把两个站点的可达性记忆合并。
+- `ServeHTTP` 先按 `/npm`、`/npm/` 前缀或旧锁文件专用的根路径 `/{package}/-/*.tgz` 别名（`npmTarballAlias`）分流到 npm，其余交给 GitHub 策略。npm 允许的路径、方法与查询参数、以及上游主机（仅 HTTPS `registry.npmjs.org:443`，重定向最多 10 跳且逐跳复检）全部由 `npmTarget` / `npmRedirect` 白名单决定；发布、登录、私有包认证与任何写操作一律拒绝，入站凭据与 `Cookie` 不下发。新增 npm 接口必须扩展同一份白名单，**禁止**放宽为通用根路径代理。
+- npm 包元数据（`npmMetadataPath`）必须经 `rewriteNPMResponse` 改写后再返回：只把 `dist.tarball` 指向客户端访问的本地 `/npm/` 地址，保留 `integrity`、`signatures` 与未知字段；请求侧强制 `Accept-Encoding: identity` 并剔除 `If-None-Match` / `If-Modified-Since` / `Range` / `If-Range`，响应侧剔除上游校验器与范围头、重算 `Content-Length` 并设 `Cache-Control: no-store`（避免缓存到旧端口或其他机器地址）。解压后元数据上限 64 MiB；压缩包及其下载响应始终保持原始字节流，不做改写。
+- 出站链路（`order` / `remember`）按仓库或 npm 包为键缓存：成功 5 分钟、失败 30 秒、最多 1024 个键，缓存按 resource 隔离。切换只允许发生在下游收到任何字节之前；响应复制中断时必须 Hijack 后直接关闭连接（不发送终止 chunk），让客户端察觉截断，**禁止**拼凑不同链路的数据。传输层固定 `DisableCompression = true`（保留 Range 偏移与二进制字节），直连链路显式置 `Proxy = nil`（不读取环境变量代理）；响应体走 `idleReader`，连续 2 分钟无数据才取消，禁止引入下载总时限。
+- 桌面侧绑定集中在 `app_github.go`：`SaveGitHubProxyConfig` 与 `SetGitHubProxyEnabled` 必须各自独立保存，禁止合并为一次读写（表单保存与开关翻转并发时不得互相覆盖）；`GitHubProxyStatus` 返回的地址以 `/github` 结尾，前端把后缀替换为 `/npm/` 得到 npm 入口，新增前缀时必须同步这两处。服务监听 `0.0.0.0`（`relayListenAddress`）；端口变更最多等待在途请求 3 秒，新端口绑定失败时保留原服务与原配置。
+- 测试：路由、重定向、头过滤、元数据改写、包路径边界与失败切换用例位于 `internal/githubproxy/*_test.go`；真实网络验收为 opt-in，仅在 `LOCALRELAY_GITHUB_E2E=1` / `LOCALRELAY_NPM_E2E=1` 时分别运行 `TestGitHubIntegration` / `TestNPMIntegration`，**禁止**让常规 `go test ./...` 发起真实网络请求。改动路由、允许列表或支持边界时必须同步 `docs/github-proxy.md`（用户说明与验收步骤）。
+
 ### 桌面集成与平台分层
 
 - 桌面集成（系统托盘、开机启动、窗口最小化/关闭隐藏、启动隐藏、网关服务启停）通过 **Go build tag** 分平台实现：`desktop_windows.go`（`//go:build windows`）承载 Windows 完整实现，`desktop_other.go`（`//go:build !windows`）提供同名方法的空实现/不支持错误，确保非 Windows 构建不崩溃。新增平台集成能力必须同时补齐 `desktop_other.go` 的占位，禁止让非目标平台编译失败。

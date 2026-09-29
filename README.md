@@ -66,6 +66,16 @@ curl http://127.0.0.1:8718/v1/chat/completions \
   }'
 ```
 
+应用还内置与 LLM 网关相互独立的**资源代理**（GitHub 只读转发与 npm 公开包转发，默认关闭，默认端口 `8719`，在「资源代理」页面开启）：
+
+```powershell
+# npm 公开包改从本地入口安装
+npm install lodash --registry=http://127.0.0.1:8719/npm/
+
+# 克隆公开仓库
+git clone http://127.0.0.1:8719/github/octocat/Hello-World.git
+```
+
 ## 测试
 
 ```powershell
@@ -78,7 +88,7 @@ go test ./...
 main.go              Wails 应用入口
 app.go               前端绑定（供应商/模型/密钥/统计/网关/更新等）
 app_desktop.go       桌面设置前端绑定（托盘行为、开机启动等）
-app_github.go        GitHub 代理生命周期、独立设置与状态绑定
+app_github.go        资源代理生命周期、独立设置与状态绑定
 desktop_windows.go   Windows 平台系统托盘、开机启动、窗口状态监听
 desktop_other.go     非 Windows 平台的桌面集成占位（不崩溃兼容）
 updater.go           应用内自动更新
@@ -92,9 +102,10 @@ internal/
     openairesponses/ OpenAI Responses 出站转换
   relay/             HTTP 网关服务、流式转发、请求头透传、Token 估算
   store/             SQLite 存储层、迁移、预设、统计查询、桌面设置
+  githubproxy/       资源代理（GitHub 只读转发 + npm 公开包转发）与出站链路选择
 frontend/            React + TailwindCSS 前端
 build/               Wails 打包配置（Windows NSIS、macOS plist）
-docs/                设计文档（ir.md）
+docs/                设计文档（ir.md、github-proxy.md）
 .github/workflows/   GitHub Actions 发布流水线
 ```
 
