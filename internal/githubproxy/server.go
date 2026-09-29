@@ -23,18 +23,34 @@ type routeChoice struct {
 }
 
 type Server struct {
-	config  Config
-	clients []*http.Client
-	mu      sync.Mutex
-	sticky  map[string]routeChoice
-	failed  [2]time.Time
+	config   Config
+	clients  []*http.Client
+	mu       sync.Mutex
+	sticky   map[string]routeChoice
+	failed   [2]time.Time
+	resource resource
+	npm      *Server
+}
+
+// Resource policies share the transport/retry/streaming implementation, while
+// keeping destination rules and reachability caches separate for each upstream.
+type resource struct {
+	name     string
+	target   func(*http.Request) (*url.URL, string, error)
+	redirect func(*http.Request, []*http.Request) error
 }
 
 func New(config Config) (*Server, error) {
 	if err := config.Validate(); err != nil {
 		return nil, err
 	}
-	s := &Server{config: config, sticky: make(map[string]routeChoice)}
+	s := newServer(config, resource{"GitHub", target, checkRedirect})
+	s.npm = newServer(config, resource{"npm", npmTarget, npmRedirect})
+	return s, nil
+}
+
+func newServer(config Config, policy resource) *Server {
+	s := &Server{config: config, resource: policy, sticky: make(map[string]routeChoice)}
 	for i := 0; i < 2; i++ {
 		if i == 1 && config.ProxyAddress == "" {
 			break
@@ -50,12 +66,15 @@ func New(config Config) (*Server, error) {
 			// net/http supports both HTTP CONNECT and SOCKS5 (remote DNS).
 			transport.Proxy = http.ProxyURL(proxyURL)
 		}
-		s.clients = append(s.clients, &http.Client{Transport: transport, CheckRedirect: checkRedirect})
+		s.clients = append(s.clients, &http.Client{Transport: transport, CheckRedirect: policy.redirect})
 	}
-	return s, nil
+	return s
 }
 
 func (s *Server) Close() {
+	if s.npm != nil {
+		s.npm.Close()
+	}
 	for _, c := range s.clients {
 		c.CloseIdleConnections()
 	}
@@ -200,7 +219,11 @@ func copyHeaders(dst, src http.Header, names []string) {
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	u, repo, err := target(r)
+	if s.npm != nil && (r.URL.Path == "/npm" || strings.HasPrefix(r.URL.Path, "/npm/") || npmTarballAlias(r)) {
+		s.npm.ServeHTTP(w, r)
+		return
+	}
+	u, repo, err := s.resource.target(r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -209,7 +232,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodPost {
 		body, err = io.ReadAll(http.MaxBytesReader(w, r.Body, maxUploadBody))
 		if err != nil {
-			http.Error(w, "git 请求体过大或读取失败", http.StatusRequestEntityTooLarge)
+			http.Error(w, "代理请求体过大或读取失败", http.StatusRequestEntityTooLarge)
 			return
 		}
 	}
@@ -219,10 +242,19 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		req, err := http.NewRequestWithContext(ctx, r.Method, u.String(), bytes.NewReader(body))
 		if err != nil {
 			cancel()
-			http.Error(w, "无效 GitHub 请求", http.StatusBadRequest)
+			http.Error(w, "无效代理请求", http.StatusBadRequest)
 			return
 		}
 		copyHeaders(req.Header, r.Header, requestHeaders)
+		metadata := s.resource.name == "npm" && npmMetadataPath(u.Path)
+		if metadata {
+			// Metadata is rewritten for this local origin. Upstream validators and
+			// byte ranges describe a different representation.
+			for _, name := range []string{"If-None-Match", "If-Modified-Since", "Range", "If-Range", "Accept-Encoding"} {
+				req.Header.Del(name)
+			}
+			req.Header.Set("Accept-Encoding", "identity")
+		}
 		headerTimer := time.AfterFunc(12*time.Second, cancel) // Also bounds proxy CONNECT and redirect chains.
 		resp, err := s.clients[index].Do(req)
 		headerTimer.Stop()
@@ -238,15 +270,24 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if attempt+1 < len(order) {
 				continue
 			}
-			http.Error(w, "GitHub 上游不可达，请检查出站代理与链路设置", http.StatusBadGateway)
+			http.Error(w, s.resource.name+" 上游不可达，请检查出站代理与链路设置", http.StatusBadGateway)
 			return
+		}
+		timer := time.AfterFunc(2*time.Minute, cancel)
+		if metadata && resp.StatusCode == http.StatusOK {
+			if err := rewriteNPMResponse(resp, r, &idleReader{resp.Body, timer}); err != nil {
+				timer.Stop()
+				resp.Body.Close()
+				cancel()
+				http.Error(w, "npm 元数据处理失败", http.StatusBadGateway)
+				return
+			}
 		}
 		s.remember(repo, index, true)
 		copyHeaders(w.Header(), resp.Header, responseHeaders)
 		w.WriteHeader(resp.StatusCode)
 		// Large packs/assets are streamed without a total request deadline. A read
 		// idle timeout bounds stalled transfers without truncating healthy ones.
-		timer := time.AfterFunc(2*time.Minute, cancel)
 		_, copyErr := io.Copy(w, &idleReader{resp.Body, timer})
 		timer.Stop()
 		resp.Body.Close()
@@ -263,7 +304,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				abortErr = conn.Close()
 			}
 			if abortErr != nil {
-				log.Printf("abort GitHub transfer after %v: %v", copyErr, abortErr)
+				log.Printf("abort %s transfer after %v: %v", s.resource.name, copyErr, abortErr)
 			}
 		}
 		return

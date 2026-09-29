@@ -92,7 +92,7 @@ func (a *App) applyGitHubLocked(settings store.GitHubProxySettings) error {
 			listener, err = net.Listen("tcp", relayListenAddress(settings.Config.Port))
 			if err != nil {
 				handler.Close()
-				return fmt.Errorf("GitHub 代理端口 %d 不可用: %w", settings.Config.Port, err)
+				return fmt.Errorf("资源代理端口 %d 不可用: %w", settings.Config.Port, err)
 			}
 		}
 	}

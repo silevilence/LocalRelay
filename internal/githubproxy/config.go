@@ -1,4 +1,6 @@
-// Package githubproxy implements a read-only GitHub gateway, independent of LLM routing.
+// Package githubproxy implements the GitHub and public npm resource gateway,
+// independent of LLM routing. Its historical name/configuration are retained so
+// existing desktop bindings and persisted settings remain compatible.
 package githubproxy
 
 import (

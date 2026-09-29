@@ -681,7 +681,7 @@ function App() {
                     <NavButton active={page === "providers"} onClick={() => setPage("providers")}>提供商</NavButton>
                     <NavButton active={page === "apikeys"} onClick={() => setPage("apikeys")}>API Key</NavButton>
                     <NavButton active={page === "stats"} onClick={() => setPage("stats")}>Token 统计</NavButton>
-                    <NavButton active={page === "github"} onClick={() => setPage("github")}>GitHub 代理</NavButton>
+                    <NavButton active={page === "github"} onClick={() => setPage("github")}>资源代理</NavButton>
                     <NavButton active={page === "settings"} onClick={() => setPage("settings")}>设置</NavButton>
                 </div>
             </header>

@@ -26,41 +26,7 @@ func TestGitHubIntegration(t *testing.T) {
 	if os.Getenv("LOCALRELAY_GITHUB_E2E") != "1" {
 		t.Skip("opt-in GitHub network acceptance")
 	}
-	var tunnels atomic.Int32
-	httpProxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != "CONNECT" {
-			http.Error(w, "CONNECT required", 405)
-			return
-		}
-		up, err := net.DialTimeout("tcp", r.Host, 5*time.Second)
-		if err != nil {
-			http.Error(w, err.Error(), 502)
-			return
-		}
-		conn, _, err := w.(http.Hijacker).Hijack()
-		if err != nil {
-			up.Close()
-			return
-		}
-		tunnels.Add(1)
-		fmt.Fprint(conn, "HTTP/1.1 200 Connection Established\r\n\r\n")
-		bridge(conn, up)
-	}))
-	defer httpProxy.Close()
-	socks, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer socks.Close()
-	go func() {
-		for {
-			conn, err := socks.Accept()
-			if err != nil {
-				return
-			}
-			go serveSOCKS(conn, &tunnels)
-		}
-	}()
+	httpProxy, socks, tunnels := integrationProxies(t)
 	var expectedCommit string
 	var expectedHash [32]byte
 	for _, mode := range []string{"direct", "http", "socks5", "auto-fallback"} {
@@ -224,4 +190,44 @@ func serveSOCKS(conn net.Conn, count *atomic.Int32) {
 	conn.Write([]byte{5, 0, 0, 1, 127, 0, 0, 1, 0, 0})
 	conn.SetDeadline(time.Time{})
 	bridge(conn, up)
+}
+
+func integrationProxies(t *testing.T) (*httptest.Server, net.Listener, *atomic.Int32) {
+	t.Helper()
+	var tunnels atomic.Int32
+	httpProxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "CONNECT" {
+			http.Error(w, "CONNECT required", 405)
+			return
+		}
+		up, err := net.DialTimeout("tcp", r.Host, 5*time.Second)
+		if err != nil {
+			http.Error(w, err.Error(), 502)
+			return
+		}
+		conn, _, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			up.Close()
+			return
+		}
+		tunnels.Add(1)
+		fmt.Fprint(conn, "HTTP/1.1 200 Connection Established\r\n\r\n")
+		bridge(conn, up)
+	}))
+	t.Cleanup(httpProxy.Close)
+	socks, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { socks.Close() })
+	go func() {
+		for {
+			conn, err := socks.Accept()
+			if err != nil {
+				return
+			}
+			go serveSOCKS(conn, &tunnels)
+		}
+	}()
+	return httpProxy, socks, &tunnels
 }

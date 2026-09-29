@@ -279,13 +279,16 @@ func TestLocalHTTPStreaming(t *testing.T) {
 	})
 	gateway := httptest.NewServer(s)
 	defer gateway.Close()
-	resp, err := http.Get(gateway.URL + "/github/o/r/archive/main.zip")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil || !bytes.Equal(body, data) {
-		t.Fatal("stream corrupted", err, len(body))
+	s.npm.clients[0].Transport = s.clients[0].Transport
+	for _, path := range []string{"/github/o/r/archive/main.zip", "/npm/@scope/pkg/-/pkg-1.0.0.tgz"} {
+		resp, err := http.Get(gateway.URL + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil || !bytes.Equal(body, data) {
+			t.Fatal(path, "stream corrupted", err, len(body))
+		}
 	}
 }
