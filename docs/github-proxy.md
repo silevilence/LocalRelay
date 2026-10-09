@@ -1,4 +1,4 @@
-# 资源代理（GitHub + npm）
+# 资源代理（GitHub + npm + 网页搜索）
 
 在「设置 → 资源代理」配置监听端口和出站链路，独立点击「保存资源代理设置」；然后到「资源代理」页面开启服务。默认端口为 `8719`，默认关闭，开关状态随应用重启保留。GitHub 与 npm 共用端口、服务开关和出站配置；该服务与 LLM 网关的设置、启停、调用日志及 Token 统计相互独立。升级保留原 GitHub 代理配置，无须重新设置。
 
@@ -54,6 +54,8 @@ npm 的下载域名替换在部分版本会丢弃 registry 的路径前缀，因
 
 ## 出站链路
 
+以下重试和缓存说明针对 GitHub/npm；网页搜索共用链路配置，但使用后文描述的独立重试策略。
+
 - **自动选择**：优先直连，连接错误、超时或上游 5xx 时尝试另一条链路；未配置代理时只有直连。
 - **仅直连**：直接访问对应上游，不读取系统环境变量中的 HTTP 代理。
 - **仅代理**：强制使用填写的代理，不回退到直连。
@@ -71,6 +73,32 @@ TCP 连接与 TLS 握手各限 5 秒，单次响应头等待限 8 秒，一次�
 仅允许 HTTPS 目标 `github.com`、`codeload.github.com`、`raw.githubusercontent.com`、`objects.githubusercontent.com`、`release-assets.githubusercontent.com`；重定向逐跳验证精确主机、端口及协议，最多 10 跳。入站 Authorization、Cookie、API Key、自定义凭据头不会出站，下载查询参数不透传。GitHub 自身产生的签名重定向参数会保留以下载 Release 资产。
 
 协议依据：[Git Smart HTTP](https://git-scm.com/docs/http-protocol)、[GitHub Release 资产](https://docs.github.com/en/rest/releases/assets)、[GitHub 仓库内容](https://docs.github.com/en/rest/repos/contents)。Release 资产主机已通过真实下载验证。
+
+## 网页搜索与 OMP 插件
+
+在「设置 → 资源代理 → 网页搜索」选择服务（目前只有 Tavily），填写 API Key，点击「保存搜索设置」。Key 使用本机存储的 AES-GCM 加密保存，设置页只返回是否已配置；编辑时留空保留原 Key，勾选清除后保存才会删除。搜索设置独立保存，不改变资源代理开关、端口和出站配置，保存后新请求立即生效。
+
+开启资源代理后，同一端口新增两个精确路径：
+
+| 接口 | 用途 |
+| --- | --- |
+| `POST /search` | 统一搜索接口，返回 JSON 格式的标题、原始链接、摘要和相关性分数 |
+| `GET /docs/search` | 返回完整 Markdown 接口说明，供内网开发 Agent 编写 OMP 插件；支持 HEAD |
+
+默认根地址为 `http://127.0.0.1:8719`。资源代理页面可复制不同网卡的搜索和文档地址；内网机器需要能够访问该资源代理端口，LLM 网关可达并不代表此端口已放行。
+
+```sh
+curl http://127.0.0.1:8719/docs/search
+curl --request POST http://127.0.0.1:8719/search --header 'Content-Type: application/json' --data '{"query":"Go HTTP server timeout","max_results":5}'
+```
+
+完整且随程序发布的接口文档源文件为 [search.md](../internal/websearch/search.md)，由服务直接内嵌返回。文档包括字段限制、默认值、成功/空结果/错误响应、取消与重试说明，以及 TypeScript fetch 示例。OMP 插件在内网独立开发，不依赖 Tavily SDK，也不接收上游 Key；未来更换搜索服务仍可使用同一接口。
+
+搜索请求只发送到所选服务的固定端点（Tavily 为 `https://api.tavily.com/search`），不接受自定义目标 URL，不跟随重定向，不转发入站凭据或 Cookie。不提供网页全文抓取或通用 HTTP/CONNECT 代理。与现有资源代理一致，两个接口不校验客户端凭据，服务应只向可信网络开放；搜索消耗搜索服务额度，不计入 LLM Token 统计。
+
+搜索共用资源代理链路模式：仅直连不读取系统代理，仅代理使用已配置的 HTTP/SOCKS5 代理，自动模式优先直连且仅在请求尚未发送时切换代理。已经发送的搜索不自动重试，即使返回 5xx，以避免重复计费。搜索不使用 GitHub/npm 的链路缓存；总执行预算 60 秒，响应头等待最多 45 秒，客户端取消会传播到上游。请求体限制 32 KiB，上游结果限制 4 MiB。
+
+上游协议依据：[Tavily Search API](https://docs.tavily.com/documentation/api-reference/endpoint/search)。初版支持 basic/advanced 深度、结果数量、时间范围和域名过滤，关闭上游自动参数、答案生成和全文返回，以保持稳定的插件接口和明确的搜索成本。
 
 ## 验证
 
@@ -102,3 +130,11 @@ Remove-Item Env:LOCALRELAY_NPM_E2E
 ```
 
 四种链路均在临时项目与独立 npm 配置/缓存中安装普通包和作用域包（禁用安装脚本），验证 ping、真实审计报告，再将锁文件还原为官方源地址，以空缓存执行 `npm ci`。服务记录请求路径以确认元数据、压缩包、旧锁文件下载与审计实际经过本地入口；npm 校验锁文件 integrity，确保包内容完整。
+
+搜索的常规测试通过本地 HTTP/TLS 测试服务器验证请求映射、凭据隔离、错误映射、配置即时生效、取消和避免重复计费的重试边界，不访问公网。真实 Tavily 验收显式开启后才运行，消耗一次 basic 搜索额度；先在本机安全设置 `TAVILY_API_KEY` 环境变量，再执行：
+
+```powershell
+$env:LOCALRELAY_TAVILY_E2E = '1'
+go test ./internal/websearch -run TestTavilyIntegration -v -count=1
+Remove-Item Env:LOCALRELAY_TAVILY_E2E
+```

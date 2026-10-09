@@ -21,7 +21,6 @@ import (
 	"time"
 
 	"localrelay/internal/capabilities"
-	"localrelay/internal/githubproxy"
 	"localrelay/internal/ir"
 	"localrelay/internal/protocol/anthropic"
 	"localrelay/internal/protocol/gemini"
@@ -50,7 +49,7 @@ type App struct {
 	quitting        atomic.Bool
 	githubMu        sync.Mutex
 	githubServer    *http.Server
-	githubHandler   atomic.Pointer[githubproxy.Server]
+	githubHandler   atomic.Pointer[resourceProxyHandler]
 	githubError     string
 }
 

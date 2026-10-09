@@ -56,6 +56,10 @@ export function RequestQuit():Promise<void>;
 
 export function SaveGitHubProxyConfig(arg1:githubproxy.Config):Promise<void>;
 
+export function SaveSearchSettings(arg1:main.SearchSettingsInput):Promise<void>;
+
+export function SearchSettings():Promise<main.SearchSettingsState>;
+
 export function SetGitHubProxyEnabled(arg1:boolean):Promise<void>;
 
 export function SetHideOnClose(arg1:boolean):Promise<store.DesktopSettings>;

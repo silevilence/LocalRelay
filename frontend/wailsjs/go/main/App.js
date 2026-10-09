@@ -106,6 +106,14 @@ export function SaveGitHubProxyConfig(arg1) {
   return window['go']['main']['App']['SaveGitHubProxyConfig'](arg1);
 }
 
+export function SaveSearchSettings(arg1) {
+  return window['go']['main']['App']['SaveSearchSettings'](arg1);
+}
+
+export function SearchSettings() {
+  return window['go']['main']['App']['SearchSettings']();
+}
+
 export function SetGitHubProxyEnabled(arg1) {
   return window['go']['main']['App']['SetGitHubProxyEnabled'](arg1);
 }

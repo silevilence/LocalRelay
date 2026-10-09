@@ -1,8 +1,10 @@
-import {useCallback, useEffect, useState} from 'react';
+import {useCallback, useEffect, useRef, useState} from 'react';
 import {GitHubProxyStatus, SaveGitHubProxyConfig, SetGitHubProxyEnabled} from '../wailsjs/go/main/App';
 import AccessAddresses from './AccessAddresses';
+import SearchSettings from './SearchSettings';
 
 const modes = {auto: '自动选择', direct: '仅直连', proxy: '仅代理'};
+const proxyTabs = [{id: 'github', label: 'GitHub'}, {id: 'npm', label: 'npm'}, {id: 'search', label: '网页搜索'}];
 const control = 'mt-2 w-full rounded-xl border border-zinc-700 bg-zinc-950 px-3 py-2.5 text-sm text-zinc-100 focus:border-emerald-500 focus:outline-none';
 
 function useProxy() {
@@ -33,9 +35,26 @@ function Feedback({error, message}) {
 
 export function GitHubProxyPage({onCopy, onSettings}) {
     const {state, error, busy, message, refresh, run} = useProxy();
+    const [activeTab, setActiveTab] = useState('github');
+    const tabRefs = useRef([]);
+    function navigateTabs(event, index) {
+        let next;
+        switch (event.key) {
+            case 'ArrowRight': next = (index + 1) % proxyTabs.length; break;
+            case 'ArrowLeft': next = (index + proxyTabs.length - 1) % proxyTabs.length; break;
+            case 'Home': next = 0; break;
+            case 'End': next = proxyTabs.length - 1; break;
+            default: return;
+        }
+        event.preventDefault();
+        setActiveTab(proxyTabs[next].id);
+        tabRefs.current[next]?.focus();
+    }
     const base = state?.addresses?.[0]?.url;
     const npmAddresses = (state?.addresses || []).map(address => ({...address, url: address.url.replace(/\/github$/, '/npm/')}));
     const npmBase = npmAddresses[0]?.url;
+    const searchAddresses = (state?.addresses || []).map(address => ({...address, url: address.url.replace(/\/github$/, '/search')}));
+    const docsAddresses = (state?.addresses || []).map(address => ({...address, url: address.url.replace(/\/github$/, '/docs/search')}));
     const npmExamples = npmBase ? [
         ['安装公开包（仅本次命令）', `npm install lodash --registry=${npmBase}`],
         ['安装作用域包', `npm install @types/node --registry=${npmBase}`],
@@ -56,32 +75,56 @@ export function GitHubProxyPage({onCopy, onSettings}) {
         <div className="mx-auto max-w-4xl">
             <section className="mt-7 rounded-2xl border border-zinc-800 bg-zinc-950/30 p-5">
                 <div className="flex flex-wrap items-start justify-between gap-4">
-                    <div><p className="text-xs font-semibold uppercase tracking-widest text-emerald-400">GitHub + npm / 资源转发</p><h2 className="mt-2 text-2xl font-bold">让仓库与依赖连接更简单</h2><p className="mt-2 text-sm text-zinc-500">GitHub 克隆与下载、npm 公开包安装，共用端口和出站链路。</p></div>
+                    <div><p className="text-xs font-semibold uppercase tracking-widest text-emerald-400">GitHub + npm + Search / 资源转发</p><h2 className="mt-2 text-2xl font-bold">连接仓库、依赖与网页搜索</h2><p className="mt-2 text-sm text-zinc-500">GitHub 克隆与下载、npm 公开包安装、Agent 网页搜索，共用端口和出站配置。</p></div>
                     <span className={`rounded-full border px-3 py-1 text-xs font-semibold ${state?.running ? 'border-emerald-800 bg-emerald-950/30 text-emerald-300' : 'border-zinc-700 text-zinc-400'}`}>{!state ? '正在读取状态…' : state.running ? '服务运行中' : state.settings.enabled ? '启动失败' : '服务已关闭'}</span>
                 </div>
                 <label className="mt-5 flex items-start justify-between gap-4 rounded-xl border border-zinc-800 bg-black/20 p-4">
                     <span><span className="block text-sm font-semibold">启用 资源代理</span><span className="mt-1 block text-xs leading-5 text-zinc-500">独立于 LLM 网关。关闭后释放端口；重启应用会保留开关状态。</span></span>
                     <input aria-label="启用 资源代理" className="mt-1 h-4 w-4 accent-emerald-500" type="checkbox" checked={Boolean(state?.settings.enabled)} disabled={!state || busy} onChange={e => { const enabled = e.target.checked; run(() => SetGitHubProxyEnabled(enabled), enabled ? '资源代理已开启。' : '资源代理已关闭。'); }} />
                 </label>
-                <div className="mt-4 flex flex-wrap items-center justify-between gap-3 text-sm"><span className="text-zinc-400">当前链路：{modes[state?.settings.config.mode] || '—'} · 端口 {state?.settings.config.port || '—'}</span><button type="button" onClick={onSettings} className="text-emerald-300 hover:text-emerald-200">配置端口与出站代理 →</button></div>
+                <div className="mt-4 flex flex-wrap items-center justify-between gap-3 text-sm"><span className="text-zinc-400">当前链路：{modes[state?.settings.config.mode] || '—'} · 端口 {state?.settings.config.port || '—'}</span><button type="button" onClick={onSettings} className="text-emerald-300 hover:text-emerald-200">配置端口、代理与搜索 →</button></div>
                 <Feedback error={error || state?.error} message={message} />
                 {state?.settings.enabled && !state.running && <button type="button" disabled={busy} onClick={() => run(() => SetGitHubProxyEnabled(true), '已重试启动。')} className="mt-3 rounded-lg border border-zinc-700 px-3 py-2 text-sm">重试启动</button>}
                 {state && !state.running && <p className="mt-3 text-xs text-zinc-500">下方为配置地址，开启服务后可用。局域网客户端请使用对应网卡地址。</p>}
             </section>
-            <section className="mt-5 rounded-2xl border border-zinc-800 bg-zinc-950/30 p-5">
+            <div role="tablist" aria-label="代理类型" className="mt-5 grid grid-cols-3 gap-1 rounded-xl border border-zinc-800 bg-zinc-950/60 p-1">
+                {proxyTabs.map((tab, index) => <button
+                    key={tab.id}
+                    ref={element => { tabRefs.current[index] = element; }}
+                    id={`proxy-tab-${tab.id}`}
+                    type="button"
+                    role="tab"
+                    aria-selected={activeTab === tab.id}
+                    aria-controls={`proxy-panel-${tab.id}`}
+                    tabIndex={activeTab === tab.id ? 0 : -1}
+                    onClick={() => setActiveTab(tab.id)}
+                    onKeyDown={event => navigateTabs(event, index)}
+                    className={`rounded-lg px-3 py-2.5 text-sm font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400 ${activeTab === tab.id ? 'bg-emerald-950/60 text-emerald-300 shadow-sm ring-1 ring-inset ring-emerald-800/70' : 'text-zinc-400 hover:bg-zinc-900 hover:text-zinc-100'}`}
+                >{tab.label}</button>)}
+            </div>
+            {activeTab === 'search' && <section id="proxy-panel-search" role="tabpanel" aria-labelledby="proxy-tab-search" tabIndex={0} className="mt-3 rounded-2xl border border-zinc-800 bg-zinc-950/30 p-5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400">
+                <h3 className="font-bold">网页搜索与插件接入</h3>
+                <p className="mt-2 text-sm leading-6 text-zinc-500">先在设置中配置 Tavily API Key。内网插件向搜索地址发送 POST JSON；将下方 Markdown 文档地址交给开发 Agent，即可获取完整接口说明。</p>
+                <p className="mt-4 text-xs font-semibold text-emerald-300">POST /search · 搜索接口</p>
+                <AccessAddresses addresses={searchAddresses} onRefresh={refresh} onCopy={onCopy} />
+                <p className="mt-4 text-xs font-semibold text-emerald-300">GET /docs/search · 插件开发文档</p>
+                <AccessAddresses addresses={docsAddresses} onRefresh={refresh} onCopy={onCopy} />
+                <p className="mt-4 text-xs leading-6 text-zinc-500">插件无需 Tavily Key。接口当前不校验客户端凭据，请在可信网络使用。搜索返回标题、链接与摘要，不抓取网页全文，也不计入 LLM Token 统计。</p>
+            </section>}
+            {activeTab === 'github' && <section id="proxy-panel-github" role="tabpanel" aria-labelledby="proxy-tab-github" tabIndex={0} className="mt-3 rounded-2xl border border-zinc-800 bg-zinc-950/30 p-5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400">
                 <h3 className="font-bold">GitHub 使用说明</h3>
                 <AccessAddresses addresses={state?.addresses || []} onRefresh={refresh} onCopy={onCopy} />
                 <p className="mt-2 text-sm leading-6 text-zinc-500">将 GitHub 地址的 https://github.com 替换为上方入口。仅支持公开仓库的读取，不支持推送、私有仓库认证或 Git LFS。</p>
                 <div className="mt-4 space-y-4">{examples.map(([label, value]) => <div key={label}><p className="mb-2 text-xs text-zinc-400">{label}</p><div className="flex items-start gap-3 rounded-lg border border-zinc-800 bg-black/30 p-3"><code className="min-w-0 flex-1 break-all text-xs leading-6 text-zinc-200">{value}</code><button type="button" onClick={() => onCopy(value)} className="shrink-0 rounded border border-zinc-700 px-2 py-1 text-xs text-zinc-400 hover:text-white">复制</button></div></div>)}</div>
                 <p className="mt-4 text-xs leading-6 text-zinc-500">insteadOf 示例在已有仓库目录执行，仅影响当前仓库，也会匹配 HTTPS 推送地址；写入请使用独立的直连 push URL。首次克隆请直接使用代理地址。自动模式优先直连，失败后尝试已配置代理；仓库链路缓存 5 分钟，失败链路缓存 30 秒。</p>
-            </section>
-            <section className="mt-5 rounded-2xl border border-zinc-800 bg-zinc-950/30 p-5">
+            </section>}
+            {activeTab === 'npm' && <section id="proxy-panel-npm" role="tabpanel" aria-labelledby="proxy-tab-npm" tabIndex={0} className="mt-3 rounded-2xl border border-zinc-800 bg-zinc-950/30 p-5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400">
                 <h3 className="font-bold">npm 使用说明</h3>
                 <p className="mt-2 text-sm leading-6 text-zinc-500">将 npm registry 设置为下方入口，支持公开包、作用域包、搜索与依赖审计。与 GitHub 共用服务开关和出站配置。</p>
                 <AccessAddresses addresses={npmAddresses} onRefresh={refresh} onCopy={onCopy} />
                 <div className="mt-4 space-y-4">{npmExamples.map(([label, value]) => <div key={label}><p className="mb-2 text-xs text-zinc-400">{label}</p><div className="flex items-start gap-3 rounded-lg border border-zinc-800 bg-black/30 p-3"><code className="min-w-0 flex-1 break-all text-xs leading-6 text-zinc-200">{value}</code><button type="button" onClick={() => onCopy(value)} className="shrink-0 rounded border border-zinc-700 px-2 py-1 text-xs text-zinc-400 hover:text-white">复制</button></div></div>)}</div>
                 <p className="mt-4 text-xs leading-6 text-zinc-500">仅支持 npm 官方公开 registry，不支持登录、发布或私有包认证。安装脚本、Git 依赖及第三方下载地址不会自动经过此入口。旧锁文件中的其他镜像地址需自行调整；项目使用完毕可删除 .npmrc 中的 registry 配置恢复默认。</p>
-            </section>
+            </section>}
         </div>
     </main>;
 }
@@ -106,5 +149,6 @@ export function GitHubProxySettings() {
             <button disabled={busy} className="mt-4 rounded-xl bg-zinc-100 px-5 py-2.5 font-bold text-zinc-950 hover:bg-white disabled:opacity-60" type="submit">{busy ? '正在保存…' : '保存 资源代理设置'}</button>
         </form>}
         <Feedback error={error} message={message} />
+        <SearchSettings />
     </section>;
 }

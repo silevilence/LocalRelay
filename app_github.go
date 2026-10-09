@@ -81,10 +81,10 @@ func (a *App) applyGitHubLocked(settings store.GitHubProxySettings) error {
 	if err != nil {
 		return err
 	}
-	var handler *githubproxy.Server
+	var handler *resourceProxyHandler
 	var listener net.Listener
 	if settings.Enabled {
-		handler, err = githubproxy.New(settings.Config)
+		handler, err = a.newResourceProxyHandler(settings.Config)
 		if err != nil {
 			return err
 		}
