@@ -54,6 +54,15 @@
 - 桌面侧绑定集中在 `app_github.go`：`SaveGitHubProxyConfig` 与 `SetGitHubProxyEnabled` 必须各自独立保存，禁止合并为一次读写（表单保存与开关翻转并发时不得互相覆盖）；`GitHubProxyStatus` 返回的地址以 `/github` 结尾，前端把后缀替换为 `/npm/` 得到 npm 入口，新增前缀时必须同步这两处。服务监听 `0.0.0.0`（`relayListenAddress`）；端口变更最多等待在途请求 3 秒，新端口绑定失败时保留原服务与原配置。
 - 测试：路由、重定向、头过滤、元数据改写、包路径边界与失败切换用例位于 `internal/githubproxy/*_test.go`；真实网络验收为 opt-in，仅在 `LOCALRELAY_GITHUB_E2E=1` / `LOCALRELAY_NPM_E2E=1` 时分别运行 `TestGitHubIntegration` / `TestNPMIntegration`，**禁止**让常规 `go test ./...` 发起真实网络请求。改动路由、允许列表或支持边界时必须同步 `docs/github-proxy.md`（用户说明与验收步骤）。
 
+### 网页搜索与抓取
+
+- `internal/websearch` 独立于 LLM 转换与 GitHub/npm 策略，由 `app_search.go` 在资源代理端口挂载 `POST /search`、`GET /docs/search` 与 `/web`。REST 与 MCP 必须调用同一业务层，禁止 MCP 经本机 HTTP 回调 `/search`。
+- `/web` 使用官方 Go MCP SDK 的无状态 Streamable HTTP JSON 模式，固定提供 `search`、`fetch`；不提供旧 SSE 通道或恢复会话。保留 SDK Host 防护，拒绝携带 Origin 的浏览器请求；工具错误用 `isError`，不得泄漏上游响应或凭据。HTTP 取消须传至上游，包括 SDK 默认分离请求 context 的旧协议版本。
+- `web_search` 设置版本 2 经 schema v12 迁移：搜索/抓取分别选择服务商，各服务商只保存一份 AES-GCM 加密 Key。切换选择不得删除 Key；桌面保存按字段更新，未提供的选择/凭据保持原值，显式空 Key 清除。前端只接收是否已配置，不接收 Key。
+- Tavily Search/Extract 与 DeepSeek Search/Fetch 的差异集中在各自适配器；固定上游 HTTPS 地址，不透传客户端头，不自动重试已发送的计费请求。DeepSeek 查询含过滤语法最多 128 字符，不支持 advanced；分数保留原尺度。fetch 只向固定上游提交 URL，不在本机访问目标网页，返回 Markdown 与显式截断标记。
+- 搜索能力差异声明在 websearch 服务商注册表；不支持的已知参数在出站前移除并追加结构化 warnings，搜索继续（DeepSeek advanced、Tavily ori_question/add_localization）。need_content 映射两家正文选项，全文放 raw_content，content 保持摘要；after/before 映射两家日期过滤，覆盖 time_range 时警告。add_localization 默认关闭，启用后仅为支持的后端经固定 ipify HTTPS 端点获取公网出口 IP；不得发送 Key/搜索词/客户端头，3 秒预算、仅内存缓存，失败警告后继续。无效请求与未知字段仍拒绝。
+- 常规测试禁止访问公网；真实验收仅在 `LOCALRELAY_TAVILY_E2E=1` / `LOCALRELAY_DEEPSEEK_E2E=1` 时运行，Key 从对应环境变量读取。修改接口或能力边界须同步内嵌 `internal/websearch/search.md` 与 `docs/github-proxy.md`。
+
 ### 桌面集成与平台分层
 
 - 桌面集成（系统托盘、开机启动、窗口最小化/关闭隐藏、启动隐藏、网关服务启停）通过 **Go build tag** 分平台实现：`desktop_windows.go`（`//go:build windows`）承载 Windows 完整实现，`desktop_other.go`（`//go:build !windows`）提供同名方法的空实现/不支持错误，确保非 Windows 构建不崩溃。新增平台集成能力必须同时补齐 `desktop_other.go` 的占位，禁止让非目标平台编译失败。

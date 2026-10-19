@@ -6,25 +6,35 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 )
 
 type Config struct {
-	Provider string
-	APIKey   string
+	SearchProvider string
+	FetchProvider  string
+	APIKeys        map[string]string
+}
+
+func DefaultConfig() Config {
+	return Config{SearchProvider: "tavily", FetchProvider: "tavily", APIKeys: map[string]string{}}
 }
 
 type ProviderInfo struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
+	ID                 string `json:"id"`
+	Name               string `json:"name"`
+	AdvancedSearch     bool   `json:"advancedSearch"`
+	MaxQueryCharacters int    `json:"maxQueryCharacters"`
 }
 
 // Each provider owns its request/response mapping; HTTP and storage do not need
 // provider-specific switches when a new adapter is registered here.
 var providers = []struct {
 	ProviderInfo
-	adapter searchProvider
+	adapter      provider
+	capabilities searchCapabilities
 }{
-	{ProviderInfo{"tavily", "Tavily"}, tavily{}},
+	{ProviderInfo{"tavily", "Tavily", true, 0}, tavily{}, searchCapabilities{}},
+	{ProviderInfo{"deepseek", "DeepSeek", false, 128}, deepseek{}, searchCapabilities{OriginalQuestion: true, Localization: true}},
 }
 
 func Providers() []ProviderInfo {
@@ -36,16 +46,21 @@ func Providers() []ProviderInfo {
 }
 
 func (c Config) Validate() error {
-	if findProvider(c.Provider) == nil {
-		return fmt.Errorf("不支持的搜索服务")
+	if findProvider(c.SearchProvider) == nil || findProvider(c.FetchProvider) == nil {
+		return fmt.Errorf("不支持的搜索或抓取服务")
 	}
-	if len(c.APIKey) > 4096 || strings.ContainsAny(c.APIKey, "\r\n\x00") {
-		return fmt.Errorf("搜索 API Key 格式无效")
+	for id, key := range c.APIKeys {
+		if findProvider(id) == nil {
+			return fmt.Errorf("不支持的凭据服务商")
+		}
+		if len(key) > 4096 || strings.ContainsAny(key, "\r\n\x00") {
+			return fmt.Errorf("网页服务 API Key 格式无效")
+		}
 	}
 	return nil
 }
 
-func findProvider(id string) searchProvider {
+func findProvider(id string) provider {
 	for _, p := range providers {
 		if p.ID == id {
 			return p.adapter
@@ -55,12 +70,19 @@ func findProvider(id string) searchProvider {
 }
 
 type Request struct {
-	Query          string   `json:"query"`
-	MaxResults     int      `json:"max_results"`
-	SearchDepth    string   `json:"search_depth"`
-	TimeRange      string   `json:"time_range,omitempty"`
-	IncludeDomains []string `json:"include_domains,omitempty"`
-	ExcludeDomains []string `json:"exclude_domains,omitempty"`
+	Query            string   `json:"query"`
+	MaxResults       int      `json:"max_results"`
+	SearchDepth      string   `json:"search_depth"`
+	TimeRange        string   `json:"time_range,omitempty"`
+	IncludeDomains   []string `json:"include_domains,omitempty"`
+	ExcludeDomains   []string `json:"exclude_domains,omitempty"`
+	OriginalQuestion string   `json:"ori_question,omitempty"`
+	NeedContent      bool     `json:"need_content,omitempty"`
+	AddLocalization  bool     `json:"add_localization,omitempty"`
+	After            string   `json:"after,omitempty"`
+	Before           string   `json:"before,omitempty"`
+	specified        map[string]json.RawMessage
+	localization     string
 }
 
 func (r *Request) validate() error {
@@ -73,6 +95,19 @@ func (r *Request) validate() error {
 	}
 	if r.SearchDepth != "basic" && r.SearchDepth != "advanced" {
 		return fmt.Errorf("search_depth 必须为 basic 或 advanced")
+	}
+	for _, date := range []*string{&r.After, &r.Before} {
+		if len(*date) == 4 {
+			*date += "-01-01"
+		}
+		if *date != "" {
+			if _, err := time.Parse("2006-01-02", *date); err != nil {
+				return fmt.Errorf("after / before 必须为 YYYY 或有效的 YYYY-MM-DD 日期")
+			}
+		}
+	}
+	if r.After != "" && r.Before != "" && r.After >= r.Before {
+		return fmt.Errorf("after 必须早于 before")
 	}
 	switch r.TimeRange {
 	case "", "day", "week", "month", "year":
@@ -93,36 +128,50 @@ func (r *Request) validate() error {
 }
 
 type Result struct {
-	Title   string  `json:"title"`
-	URL     string  `json:"url"`
-	Content string  `json:"content"`
-	Score   float64 `json:"score"`
+	Title      string  `json:"title"`
+	URL        string  `json:"url"`
+	Content    string  `json:"content"`
+	Score      float64 `json:"score"`
+	RawContent string  `json:"raw_content,omitempty"`
 }
 
 type Response struct {
-	Version  string   `json:"version"`
-	Provider string   `json:"provider"`
-	Query    string   `json:"query"`
-	Results  []Result `json:"results"`
+	Version  string    `json:"version"`
+	Provider string    `json:"provider"`
+	Query    string    `json:"query"`
+	Results  []Result  `json:"results"`
+	Warnings []Warning `json:"warnings,omitempty"`
 }
 
 func decodeRequest(body []byte) (Request, error) {
 	input := Request{MaxResults: 5, SearchDepth: "basic"}
+	if err := decodeObject(body, &input); err != nil {
+		return input, err
+	}
+	// Keep presence separately: even an explicitly supplied false value for an
+	// unsupported parameter deserves a warning, unlike an omitted default.
+	if err := json.Unmarshal(body, &input.specified); err != nil {
+		return input, err
+	}
+	return input, input.validate()
+}
+
+func decodeObject(body []byte, target any) error {
 	// JSON null is not a search request; null optional fields also must not
 	// silently inherit defaults and hide client schema mistakes.
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(body, &fields); err != nil || fields == nil {
-		return input, fmt.Errorf("请求体必须为 JSON 对象")
+		return fmt.Errorf("请求体必须为 JSON 对象")
 	}
 	for _, value := range fields {
 		if bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
-			return input, fmt.Errorf("请求字段不能为 null")
+			return fmt.Errorf("请求字段不能为 null")
 		}
 	}
 	decoder := json.NewDecoder(bytes.NewReader(body))
 	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&input); err != nil {
-		return input, fmt.Errorf("请求字段未知或类型错误，请参考 /docs/search")
+	if err := decoder.Decode(target); err != nil {
+		return fmt.Errorf("请求字段未知或类型错误，请参考 /docs/search")
 	}
-	return input, input.validate()
+	return nil
 }

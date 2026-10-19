@@ -22,7 +22,9 @@ func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { retu
 
 func fixture(t *testing.T, transport roundTripFunc) *Server {
 	t.Helper()
-	s := New(func() (Config, error) { return Config{"tavily", "test-upstream-key"}, nil }, "direct", nil)
+	s := New(func() (Config, error) {
+		return Config{"tavily", "tavily", map[string]string{"tavily": "test-upstream-key"}}, nil
+	}, "direct", nil)
 	s.clients[0].Transport = transport
 	t.Cleanup(s.Close)
 	return s
@@ -150,15 +152,15 @@ func TestSearchUnavailableAndHotConfig(t *testing.T) {
 		}
 		return result(200, `{"results":[]}`)
 	})
-	cfg := Config{Provider: "tavily"}
+	cfg := DefaultConfig()
 	s.load = func() (Config, error) { return cfg, nil }
 	checkError(t, call(s, "POST", "/search", `{"query":"q"}`), 503, "search_not_configured")
-	cfg.APIKey = "updated"
+	cfg.APIKeys["tavily"] = "updated"
 	w := call(s, "POST", "/search", `{"query":"q"}`)
 	if w.Code != 200 || !strings.Contains(w.Body.String(), `"results":[]`) {
 		t.Fatal(w.Body.String())
 	}
-	cfg.Provider = "missing"
+	cfg.SearchProvider = "missing"
 	checkError(t, call(s, "POST", "/search", `{"query":"q"}`), 503, "search_unavailable")
 	s.load = func() (Config, error) { return Config{}, errors.New("secret database error") }
 	checkError(t, call(s, "POST", "/search", `{"query":"q"}`), 503, "search_unavailable")
@@ -300,13 +302,13 @@ func TestSearchTransportPolicy(t *testing.T) {
 	if len(newClients("auto", nil)) != 1 {
 		t.Fatal("auto without proxy")
 	}
-	for _, cfg := range []Config{{"invalid", ""}, {"tavily", "key\r\n"}, {"tavily", strings.Repeat("k", 4097)}} {
+	for _, cfg := range []Config{{"invalid", "tavily", nil}, {"tavily", "tavily", map[string]string{"tavily": "key\r\n"}}, {"tavily", "tavily", map[string]string{"tavily": strings.Repeat("k", 4097)}}} {
 		if cfg.Validate() == nil {
 			t.Fatal("bad config accepted")
 		}
 	}
 	list := Providers()
-	if len(list) != 1 || list[0].ID != "tavily" {
+	if len(list) != 2 || list[0].ID != "tavily" {
 		t.Fatal(list)
 	}
 	list[0].ID = "mutated"
@@ -328,7 +330,9 @@ func TestSearchHTTPEndToEnd(t *testing.T) {
 		_, _ = io.WriteString(w, `{"results":[{"title":"Local fixture","url":"https://example.com","content":"search works","score":1}]}`)
 	}))
 	defer upstream.Close()
-	s := New(func() (Config, error) { return Config{"tavily", "test-upstream-key"}, nil }, "direct", nil)
+	s := New(func() (Config, error) {
+		return Config{"tavily", "tavily", map[string]string{"tavily": "test-upstream-key"}}, nil
+	}, "direct", nil)
 	defer s.Close()
 	tr := upstream.Client().Transport.(*http.Transport).Clone()
 	// Test certificate belongs to example.com; test-only trust from httptest.

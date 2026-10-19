@@ -327,6 +327,7 @@ func (s *Store) applyMigrations() error {
 		{9, s.migrateAggregationConfigKeys},
 		{10, s.seedOpencodeReasoningContentCapabilities},
 		{11, s.ensureProviderEnabledColumn},
+		{12, s.migrateWebSettings},
 	}
 	for _, migration := range migrations {
 		var exists int

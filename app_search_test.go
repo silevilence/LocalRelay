@@ -22,37 +22,37 @@ func TestSearchSettingsAndResourceListener(t *testing.T) {
 	a.store = s
 	t.Cleanup(func() { a.stopGitHubLocked() })
 	state, err := a.SearchSettings()
-	if err != nil || state.Provider != "tavily" || state.HasAPIKey || len(state.Providers) != 1 {
+	if err != nil || state.SearchProvider != "tavily" || state.HasAPIKeys["tavily"] || len(state.Providers) != 2 {
 		t.Fatal(state, err)
 	}
 	key := " tvly-test-secret "
-	if err := a.SaveSearchSettings(SearchSettingsInput{"tavily", &key}); err != nil {
+	if err := a.SaveSearchSettings(SearchSettingsInput{APIKeys: map[string]string{"tavily": key}}); err != nil {
 		t.Fatal(err)
 	}
 	state, err = a.SearchSettings()
-	if err != nil || !state.HasAPIKey {
+	if err != nil || !state.HasAPIKeys["tavily"] {
 		t.Fatal(state, err)
 	}
 	encoded, err := json.Marshal(state)
 	if err != nil || strings.Contains(string(encoded), "secret") {
 		t.Fatal("key exposed in desktop state")
 	}
-	if err := a.SaveSearchSettings(SearchSettingsInput{Provider: "tavily"}); err != nil {
+	if err := a.SaveSearchSettings(SearchSettingsInput{}); err != nil {
 		t.Fatal(err)
 	}
 	saved, err := s.SearchSettings()
-	if err != nil || saved.APIKey != "tvly-test-secret" {
+	if err != nil || saved.APIKeys["tavily"] != "tvly-test-secret" {
 		t.Fatal("blank draft did not preserve key", err)
 	}
-	if err := a.SaveSearchSettings(SearchSettingsInput{Provider: "invalid"}); err == nil {
+	if err := a.SaveSearchSettings(SearchSettingsInput{APIKeys: map[string]string{"invalid": key}}); err == nil {
 		t.Fatal("invalid selection saved")
 	}
 	empty := ""
-	if err := a.SaveSearchSettings(SearchSettingsInput{"tavily", &empty}); err != nil {
+	if err := a.SaveSearchSettings(SearchSettingsInput{APIKeys: map[string]string{"tavily": empty}}); err != nil {
 		t.Fatal(err)
 	}
 	state, _ = a.SearchSettings()
-	if state.HasAPIKey {
+	if state.HasAPIKeys["tavily"] {
 		t.Fatal("key not cleared")
 	}
 	resource, err := s.GitHubProxySettings()
@@ -90,7 +90,23 @@ func TestSearchSettingsAndResourceListener(t *testing.T) {
 	if err != nil || resp.StatusCode != 503 || !strings.Contains(string(body), "search_not_configured") {
 		t.Fatal(resp.Status, string(body), err)
 	}
-	for _, path := range []string{"/search/extra", "/docs/search/extra", "/github/invalid", "/npm/-/user/org.couchdb.user:x"} {
+	req, err := http.NewRequest("POST", base+"/web", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	req.Header.Set("MCP-Protocol-Version", "2025-11-25")
+	resp, err = client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil || resp.StatusCode != 200 || !strings.Contains(string(body), `"name":"fetch"`) {
+		t.Fatal("MCP not mounted on resource listener", err)
+	}
+	for _, path := range []string{"/web/extra", "/search/extra", "/docs/search/extra", "/github/invalid", "/npm/-/user/org.couchdb.user:x"} {
 		resp, err = client.Get(base + path)
 		if err != nil {
 			t.Fatal(err)
@@ -101,7 +117,7 @@ func TestSearchSettingsAndResourceListener(t *testing.T) {
 		}
 	}
 	old := a.githubServer
-	if err := a.SaveSearchSettings(SearchSettingsInput{"tavily", &key}); err != nil {
+	if err := a.SaveSearchSettings(SearchSettingsInput{APIKeys: map[string]string{"tavily": key}}); err != nil {
 		t.Fatal(err)
 	}
 	if a.githubServer != old {
@@ -113,7 +129,7 @@ func TestSearchSettingsAndResourceListener(t *testing.T) {
 		t.Fatal(err)
 	}
 	state, _ = a.SearchSettings()
-	if !state.HasAPIKey {
+	if !state.HasAPIKeys["tavily"] {
 		t.Fatal("resource save erased search key")
 	}
 	if err := a.SetGitHubProxyEnabled(false); err != nil {
@@ -131,7 +147,60 @@ func TestSearchSettingsAndResourceListener(t *testing.T) {
 	if _, err := a.SearchSettings(); err == nil {
 		t.Fatal("closed store read")
 	}
-	if err := a.SaveSearchSettings(SearchSettingsInput{Provider: "tavily"}); err == nil {
+	if err := a.SaveSearchSettings(SearchSettingsInput{}); err == nil {
 		t.Fatal("closed store save")
+	}
+}
+
+func TestWebSettingsIndependentSelectionsAndKeyUpdates(t *testing.T) {
+	s, err := store.Open(filepath.Join(t.TempDir(), "db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	a := NewApp()
+	a.store = s
+	deepseek, tavily := "deepseek", "tavily"
+	if err = a.SaveSearchSettings(SearchSettingsInput{SearchProvider: &deepseek, APIKeys: map[string]string{"deepseek": "deep-key", "tavily": "tav-key"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err = a.SaveSearchSettings(SearchSettingsInput{FetchProvider: &deepseek}); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := s.SearchSettings()
+	if err != nil || cfg.SearchProvider != "deepseek" || cfg.FetchProvider != "deepseek" || cfg.APIKeys["deepseek"] != "deep-key" || cfg.APIKeys["tavily"] != "tav-key" {
+		t.Fatal("settings not independent")
+	}
+	if err = a.SaveSearchSettings(SearchSettingsInput{SearchProvider: &tavily}); err != nil {
+		t.Fatal(err)
+	}
+	if err = a.SaveSearchSettings(SearchSettingsInput{SearchProvider: &deepseek}); err != nil {
+		t.Fatal(err)
+	}
+	if err = a.SaveSearchSettings(SearchSettingsInput{APIKeys: map[string]string{"deepseek": "updated-key"}}); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err = s.SearchSettings()
+	if err != nil || cfg.APIKeys["deepseek"] != "updated-key" || cfg.APIKeys["tavily"] != "tav-key" {
+		t.Fatal("keys lost on switch")
+	}
+	invalid := "unknown"
+	if err = a.SaveSearchSettings(SearchSettingsInput{FetchProvider: &invalid, APIKeys: map[string]string{"deepseek": "do-not-save"}}); err == nil {
+		t.Fatal("invalid saved")
+	}
+	cfg, err = s.SearchSettings()
+	if err != nil || cfg.APIKeys["deepseek"] != "updated-key" {
+		t.Fatal("invalid save partially applied")
+	}
+	if err = a.SaveSearchSettings(SearchSettingsInput{APIKeys: map[string]string{"deepseek": ""}}); err != nil {
+		t.Fatal(err)
+	}
+	state, err := a.SearchSettings()
+	if err != nil || state.HasAPIKeys["deepseek"] || !state.HasAPIKeys["tavily"] {
+		t.Fatal(state, err)
+	}
+	data, _ := json.Marshal(state)
+	if strings.Contains(string(data), "tav-key") || strings.Contains(string(data), "updated-key") {
+		t.Fatal("key leaked")
 	}
 }

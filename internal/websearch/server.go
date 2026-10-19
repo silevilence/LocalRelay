@@ -1,13 +1,11 @@
 package websearch
 
 import (
-	"context"
 	_ "embed"
 	"encoding/json"
 	"errors"
 	"io"
 	"mime"
-	"net"
 	"net/http"
 	"net/url"
 	"time"
@@ -19,12 +17,16 @@ var documentation string
 const searchTimeout = 60 * time.Second
 
 type Server struct {
-	load    func() (Config, error)
-	clients []*http.Client
+	load         func() (Config, error)
+	clients      []*http.Client
+	mcp          http.Handler
+	localization localizationResolver
 }
 
 func New(load func() (Config, error), mode string, proxyURL *url.URL) *Server {
-	return &Server{load: load, clients: newClients(mode, proxyURL)}
+	s := &Server{load: load, clients: newClients(mode, proxyURL)}
+	s.mcp = s.newMCPHandler()
+	return s
 }
 
 func (s *Server) Close() {
@@ -52,6 +54,10 @@ func writeError(w http.ResponseWriter, status int, code, message string) {
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
+	if r.URL.Path == "/web" {
+		s.mcp.ServeHTTP(w, r)
+		return
+	}
 	if r.URL.Path == "/docs/search" {
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			w.Header().Set("Allow", "GET, HEAD")
@@ -95,36 +101,16 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "invalid_request", err.Error())
 		return
 	}
-	cfg, err := s.load()
-	if err != nil || cfg.Validate() != nil {
-		writeError(w, 503, "search_unavailable", "搜索配置不可用")
-		return
-	}
-	if cfg.APIKey == "" {
-		writeError(w, 503, "search_not_configured", "请在设置中配置搜索 API Key")
-		return
-	}
-	ctx, cancel := context.WithTimeout(r.Context(), searchTimeout)
-	defer cancel()
-	response, err := findProvider(cfg.Provider).search(ctx, s.clients, cfg.APIKey, input)
+	response, err := s.Search(r.Context(), input)
 	if err != nil {
 		if r.Context().Err() != nil {
 			return
 		}
-		var upstream *apiError
-		var timeout net.Error
-		if errors.Is(err, context.DeadlineExceeded) || ctx.Err() != nil || (errors.As(err, &timeout) && timeout.Timeout()) {
-			writeError(w, 504, "search_timeout", "搜索服务响应超时")
-		} else if errors.As(err, &upstream) {
-			writeError(w, upstream.Status, upstream.Code, upstream.Message)
-		} else {
-			writeError(w, 502, "search_upstream_error", "搜索服务请求失败")
+		var failure *apiError
+		if errors.As(err, &failure) {
+			writeError(w, failure.Status, failure.Code, failure.Message)
 		}
 		return
-	}
-	response.Version, response.Provider, response.Query = "1", cfg.Provider, input.Query
-	if response.Results == nil {
-		response.Results = []Result{}
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	_ = json.NewEncoder(w).Encode(response)

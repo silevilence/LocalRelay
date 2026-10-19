@@ -10,15 +10,17 @@ import (
 )
 
 type SearchSettingsState struct {
-	Provider  string                   `json:"provider"`
-	HasAPIKey bool                     `json:"hasApiKey"`
-	Providers []websearch.ProviderInfo `json:"providers"`
+	SearchProvider string                   `json:"searchProvider"`
+	FetchProvider  string                   `json:"fetchProvider"`
+	HasAPIKeys     map[string]bool          `json:"hasApiKeys"`
+	Providers      []websearch.ProviderInfo `json:"providers"`
 }
 
 type SearchSettingsInput struct {
-	Provider string `json:"provider"`
-	// nil retains the current key; an explicit empty string removes it.
-	APIKey *string `json:"apiKey"`
+	// Omitted selections retain current values; omitted keys retain secrets.
+	SearchProvider *string           `json:"searchProvider"`
+	FetchProvider  *string           `json:"fetchProvider"`
+	APIKeys        map[string]string `json:"apiKeys"`
 }
 
 func (a *App) SearchSettings() (SearchSettingsState, error) {
@@ -26,7 +28,11 @@ func (a *App) SearchSettings() (SearchSettingsState, error) {
 	if err != nil {
 		return SearchSettingsState{}, err
 	}
-	return SearchSettingsState{cfg.Provider, cfg.APIKey != "", websearch.Providers()}, nil
+	state := SearchSettingsState{cfg.SearchProvider, cfg.FetchProvider, map[string]bool{}, websearch.Providers()}
+	for _, p := range state.Providers {
+		state.HasAPIKeys[p.ID] = cfg.APIKeys[p.ID] != ""
+	}
+	return state, nil
 }
 
 func (a *App) SaveSearchSettings(input SearchSettingsInput) error {
@@ -36,13 +42,14 @@ func (a *App) SaveSearchSettings(input SearchSettingsInput) error {
 	if err != nil {
 		return err
 	}
-	// A provider switch must not silently reuse another provider's credential.
-	if cfg.Provider != input.Provider {
-		cfg.APIKey = ""
+	if input.SearchProvider != nil {
+		cfg.SearchProvider = *input.SearchProvider
 	}
-	cfg.Provider = input.Provider
-	if input.APIKey != nil {
-		cfg.APIKey = strings.TrimSpace(*input.APIKey)
+	if input.FetchProvider != nil {
+		cfg.FetchProvider = *input.FetchProvider
+	}
+	for id, key := range input.APIKeys {
+		cfg.APIKeys[id] = strings.TrimSpace(key)
 	}
 	return a.store.SetSearchSettings(cfg)
 }
@@ -71,7 +78,7 @@ func (a *App) newResourceProxyHandler(config githubproxy.Config) (*resourceProxy
 }
 
 func (h *resourceProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path == "/search" || r.URL.Path == "/docs/search" {
+	if r.URL.Path == "/search" || r.URL.Path == "/docs/search" || r.URL.Path == "/web" {
 		h.search.ServeHTTP(w, r)
 		return
 	}

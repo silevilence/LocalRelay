@@ -74,18 +74,19 @@ TCP 连接与 TLS 握手各限 5 秒，单次响应头等待限 8 秒，一次�
 
 协议依据：[Git Smart HTTP](https://git-scm.com/docs/http-protocol)、[GitHub Release 资产](https://docs.github.com/en/rest/releases/assets)、[GitHub 仓库内容](https://docs.github.com/en/rest/repos/contents)。Release 资产主机已通过真实下载验证。
 
-## 网页搜索与 OMP 插件
+## 网页搜索、抓取与 Agent 接入
 
-在「设置 → 资源代理 → 网页搜索」选择服务（目前只有 Tavily），填写 API Key，点击「保存搜索设置」。Key 使用本机存储的 AES-GCM 加密保存，设置页只返回是否已配置；编辑时留空保留原 Key，勾选清除后保存才会删除。搜索设置独立保存，不改变资源代理开关、端口和出站配置，保存后新请求立即生效。
+在「设置 → 资源代理 → 网页搜索与抓取」分别选择搜索与抓取服务（Tavily / DeepSeek），填写服务商 API Key，点击「保存网页服务设置」。Key 使用本机存储的 AES-GCM 加密保存，设置页只返回是否已配置；编辑时留空保留原 Key，勾选清除后保存才会删除。搜索设置独立保存，不改变资源代理开关、端口和出站配置，保存后新请求立即生效。
 
-开启资源代理后，同一端口新增两个精确路径：
+开启资源代理后，同一端口提供三个精确路径：
 
 | 接口 | 用途 |
 | --- | --- |
+| `/web` | Streamable HTTP MCP 入口，提供 search 与 fetch 工具，两者均支持 Tavily / DeepSeek |
 | `POST /search` | 统一搜索接口，返回 JSON 格式的标题、原始链接、摘要和相关性分数 |
 | `GET /docs/search` | 返回完整 Markdown 接口说明，供内网开发 Agent 编写 OMP 插件；支持 HEAD |
 
-默认根地址为 `http://127.0.0.1:8719`。资源代理页面可复制不同网卡的搜索和文档地址；内网机器需要能够访问该资源代理端口，LLM 网关可达并不代表此端口已放行。
+默认根地址为 `http://127.0.0.1:8719`。资源代理页面可复制不同网卡的 MCP、搜索和文档地址；内网机器需要能够访问该资源代理端口，LLM 网关可达并不代表此端口已放行。
 
 ```sh
 curl http://127.0.0.1:8719/docs/search
@@ -94,11 +95,11 @@ curl --request POST http://127.0.0.1:8719/search --header 'Content-Type: applica
 
 完整且随程序发布的接口文档源文件为 [search.md](../internal/websearch/search.md)，由服务直接内嵌返回。文档包括字段限制、默认值、成功/空结果/错误响应、取消与重试说明，以及 TypeScript fetch 示例。OMP 插件在内网独立开发，不依赖 Tavily SDK，也不接收上游 Key；未来更换搜索服务仍可使用同一接口。
 
-搜索请求只发送到所选服务的固定端点（Tavily 为 `https://api.tavily.com/search`），不接受自定义目标 URL，不跟随重定向，不转发入站凭据或 Cookie。不提供网页全文抓取或通用 HTTP/CONNECT 代理。与现有资源代理一致，两个接口不校验客户端凭据，服务应只向可信网络开放；搜索消耗搜索服务额度，不计入 LLM Token 统计。
+搜索与抓取请求只发送到所选服务的固定 HTTPS 端点（Tavily Search/Extract、DeepSeek Search/Fetch），不接受自定义上游 API 地址，不跟随重定向，不转发入站凭据或 Cookie。网页正文通过 `/web` 的 fetch 工具提取；不提供通用 HTTP/CONNECT 代理。与现有资源代理一致，这些接口不校验客户端凭据，服务应只向可信网络开放；搜索消耗搜索服务额度，不计入 LLM Token 统计。
 
-搜索共用资源代理链路模式：仅直连不读取系统代理，仅代理使用已配置的 HTTP/SOCKS5 代理，自动模式优先直连且仅在请求尚未发送时切换代理。已经发送的搜索不自动重试，即使返回 5xx，以避免重复计费。搜索不使用 GitHub/npm 的链路缓存；总执行预算 60 秒，响应头等待最多 45 秒，客户端取消会传播到上游。请求体限制 32 KiB，上游结果限制 4 MiB。
+搜索共用资源代理链路模式：仅直连不读取系统代理，仅代理使用已配置的 HTTP/SOCKS5 代理，自动模式优先直连且仅在请求尚未发送时切换代理。已经发送的搜索不自动重试，即使返回 5xx，以避免重复计费。搜索不使用 GitHub/npm 的链路缓存；总执行预算 60 秒，响应头等待最多 45 秒，客户端取消会传播到上游。请求体限制 32 KiB，搜索上游结果限制 4 MiB（need_content=true 时为 16 MiB），抓取上游结果限制 8 MiB。
 
-上游协议依据：[Tavily Search API](https://docs.tavily.com/documentation/api-reference/endpoint/search)。初版支持 basic/advanced 深度、结果数量、时间范围和域名过滤，关闭上游自动参数、答案生成和全文返回，以保持稳定的插件接口和明确的搜索成本。
+上游协议依据：[Tavily Search API](https://docs.tavily.com/documentation/api-reference/endpoint/search)。Tavily 支持 basic/advanced 深度、结果数量、时间范围和域名过滤，关闭上游自动参数、答案生成，默认关闭全文；need_content=true 时请求正文并返回 raw_content，content 保留摘要。
 
 ## 验证
 
@@ -138,3 +139,13 @@ $env:LOCALRELAY_TAVILY_E2E = '1'
 go test ./internal/websearch -run TestTavilyIntegration -v -count=1
 Remove-Item Env:LOCALRELAY_TAVILY_E2E
 ```
+
+### 网页工具 MCP 接入与验收
+
+在设置 → 资源代理 → 网页搜索与抓取中，分别选择搜索、抓取服务，按服务商保存一份 API Key。同一服务商凭据共享，切换不删除；旧 Tavily 配置自动迁移。将 `http://127.0.0.1:8719/web` 添加到支持 Streamable HTTP 的 MCP 客户端，检查初始化、工具列表中的 search/fetch，分别搜索 Go 文档与抓取 `https://go.dev/doc/`。客户端无需上游 Key。
+
+`/web` 返回 JSON，不提供独立 SSE 通道；拒绝携带 Origin 的浏览器请求。仅在可信网络使用。`/search` 的请求与结果结构保留，跟随搜索服务选择；DeepSeek 的查询长度和高级参数限制见[完整接口说明](../internal/websearch/search.md)。该说明也包含错误处理、取消、截断语义与 opt-in 真实网络测试命令。
+
+搜索新增 ori_question、need_content、add_localization、after、before。after/before 接受 YYYY 或 YYYY-MM-DD，分别映射到 Tavily 的 start_date/end_date 与 DeepSeek 的日期操作符；显式日期优先于 time_range，被覆盖的相对时间会产生警告。不支持的已知参数忽略并附加 warnings，搜索继续；如 Tavily 的 ori_question/add_localization、DeepSeek 的 advanced 深度。非法类型、未知字段与超长 DeepSeek 查询仍报错。
+
+add_localization=true 仅在支持 IP 本地化的后端启用：软件沿当前出站链路请求 ipify 获取公网出口 IP（可能是代理出口），将其发给 DeepSeek，不发送系统配置或搜索词到 ipify。3 秒超时，内存缓存成功 5 分钟/失败 30 秒；失败返回警告而不阻断搜索。默认关闭，Tavily 不执行定位查询。

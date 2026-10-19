@@ -4,7 +4,7 @@ import AccessAddresses from './AccessAddresses';
 import SearchSettings from './SearchSettings';
 
 const modes = {auto: '自动选择', direct: '仅直连', proxy: '仅代理'};
-const proxyTabs = [{id: 'github', label: 'GitHub'}, {id: 'npm', label: 'npm'}, {id: 'search', label: '网页搜索'}];
+const proxyTabs = [{id: 'github', label: 'GitHub'}, {id: 'npm', label: 'npm'}, {id: 'search', label: '网页服务'}];
 const control = 'mt-2 w-full rounded-xl border border-zinc-700 bg-zinc-950 px-3 py-2.5 text-sm text-zinc-100 focus:border-emerald-500 focus:outline-none';
 
 function useProxy() {
@@ -54,6 +54,7 @@ export function GitHubProxyPage({onCopy, onSettings}) {
     const npmAddresses = (state?.addresses || []).map(address => ({...address, url: address.url.replace(/\/github$/, '/npm/')}));
     const npmBase = npmAddresses[0]?.url;
     const searchAddresses = (state?.addresses || []).map(address => ({...address, url: address.url.replace(/\/github$/, '/search')}));
+    const mcpAddresses = (state?.addresses || []).map(address => ({...address, url: address.url.replace(/\/github$/, '/web')}));
     const docsAddresses = (state?.addresses || []).map(address => ({...address, url: address.url.replace(/\/github$/, '/docs/search')}));
     const npmExamples = npmBase ? [
         ['安装公开包（仅本次命令）', `npm install lodash --registry=${npmBase}`],
@@ -75,7 +76,7 @@ export function GitHubProxyPage({onCopy, onSettings}) {
         <div className="mx-auto max-w-4xl">
             <section className="mt-7 rounded-2xl border border-zinc-800 bg-zinc-950/30 p-5">
                 <div className="flex flex-wrap items-start justify-between gap-4">
-                    <div><p className="text-xs font-semibold uppercase tracking-widest text-emerald-400">GitHub + npm + Search / 资源转发</p><h2 className="mt-2 text-2xl font-bold">连接仓库、依赖与网页搜索</h2><p className="mt-2 text-sm text-zinc-500">GitHub 克隆与下载、npm 公开包安装、Agent 网页搜索，共用端口和出站配置。</p></div>
+                    <div><p className="text-xs font-semibold uppercase tracking-widest text-emerald-400">GitHub + npm + Web MCP / 资源转发</p><h2 className="mt-2 text-2xl font-bold">连接仓库、依赖与网页服务</h2><p className="mt-2 text-sm text-zinc-500">GitHub 克隆与下载、npm 公开包安装、Agent 网页搜索与抓取，共用端口和出站配置。</p></div>
                     <span className={`rounded-full border px-3 py-1 text-xs font-semibold ${state?.running ? 'border-emerald-800 bg-emerald-950/30 text-emerald-300' : 'border-zinc-700 text-zinc-400'}`}>{!state ? '正在读取状态…' : state.running ? '服务运行中' : state.settings.enabled ? '启动失败' : '服务已关闭'}</span>
                 </div>
                 <label className="mt-5 flex items-start justify-between gap-4 rounded-xl border border-zinc-800 bg-black/20 p-4">
@@ -103,13 +104,16 @@ export function GitHubProxyPage({onCopy, onSettings}) {
                 >{tab.label}</button>)}
             </div>
             {activeTab === 'search' && <section id="proxy-panel-search" role="tabpanel" aria-labelledby="proxy-tab-search" tabIndex={0} className="mt-3 rounded-2xl border border-zinc-800 bg-zinc-950/30 p-5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400">
-                <h3 className="font-bold">网页搜索与插件接入</h3>
-                <p className="mt-2 text-sm leading-6 text-zinc-500">先在设置中配置 Tavily API Key。内网插件向搜索地址发送 POST JSON；将下方 Markdown 文档地址交给开发 Agent，即可获取完整接口说明。</p>
+                <h3 className="font-bold">网页搜索、抓取与 MCP 接入</h3>
+                <p className="mt-2 text-sm leading-6 text-zinc-500">先在设置中选择搜索与抓取服务并配置 API Key。支持 Tavily 与 DeepSeek；将下方文档地址交给开发 Agent，可查看工具参数与接入方式。</p>
+                <p className="mt-4 text-xs font-semibold text-emerald-300">/web · MCP 端点</p>
+                <AccessAddresses addresses={mcpAddresses} onRefresh={refresh} onCopy={onCopy} />
+                <p className="mt-2 text-xs leading-6 text-zinc-400">在 Agent 的 MCP 设置中选择 Streamable HTTP，填入此地址，即可发现 search 和 fetch 工具。客户端无需填写上游 API Key。仅向可信网络开放。</p>
                 <p className="mt-4 text-xs font-semibold text-emerald-300">POST /search · 搜索接口</p>
                 <AccessAddresses addresses={searchAddresses} onRefresh={refresh} onCopy={onCopy} />
                 <p className="mt-4 text-xs font-semibold text-emerald-300">GET /docs/search · 插件开发文档</p>
                 <AccessAddresses addresses={docsAddresses} onRefresh={refresh} onCopy={onCopy} />
-                <p className="mt-4 text-xs leading-6 text-zinc-500">插件无需 Tavily Key。接口当前不校验客户端凭据，请在可信网络使用。搜索返回标题、链接与摘要，不抓取网页全文，也不计入 LLM Token 统计。</p>
+                <p className="mt-4 text-xs leading-6 text-zinc-500">客户端无需上游 Key。接口当前不校验客户端凭据，请在可信网络使用。search 返回摘要，fetch 提取正文；两者都不计入 LLM Token 统计。</p>
             </section>}
             {activeTab === 'github' && <section id="proxy-panel-github" role="tabpanel" aria-labelledby="proxy-tab-github" tabIndex={0} className="mt-3 rounded-2xl border border-zinc-800 bg-zinc-950/30 p-5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400">
                 <h3 className="font-bold">GitHub 使用说明</h3>

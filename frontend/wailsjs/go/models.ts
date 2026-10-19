@@ -121,8 +121,9 @@ export namespace main {
 	    }
 	}
 	export class SearchSettingsInput {
-	    provider: string;
-	    apiKey?: string;
+	    searchProvider?: string;
+	    fetchProvider?: string;
+	    apiKeys: Record<string, string>;
 
 	    static createFrom(source: any = {}) {
 	        return new SearchSettingsInput(source);
@@ -130,13 +131,15 @@ export namespace main {
 
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.provider = source["provider"];
-	        this.apiKey = source["apiKey"];
+	        this.searchProvider = source["searchProvider"];
+	        this.fetchProvider = source["fetchProvider"];
+	        this.apiKeys = source["apiKeys"];
 	    }
 	}
 	export class SearchSettingsState {
-	    provider: string;
-	    hasApiKey: boolean;
+	    searchProvider: string;
+	    fetchProvider: string;
+	    hasApiKeys: Record<string, boolean>;
 	    providers: websearch.ProviderInfo[];
 
 	    static createFrom(source: any = {}) {
@@ -145,8 +148,9 @@ export namespace main {
 
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.provider = source["provider"];
-	        this.hasApiKey = source["hasApiKey"];
+	        this.searchProvider = source["searchProvider"];
+	        this.fetchProvider = source["fetchProvider"];
+	        this.hasApiKeys = source["hasApiKeys"];
 	        this.providers = this.convertValues(source["providers"], websearch.ProviderInfo);
 	    }
 
@@ -824,6 +828,8 @@ export namespace websearch {
 	export class ProviderInfo {
 	    id: string;
 	    name: string;
+	    advancedSearch: boolean;
+	    maxQueryCharacters: number;
 
 	    static createFrom(source: any = {}) {
 	        return new ProviderInfo(source);
@@ -833,6 +839,8 @@ export namespace websearch {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.id = source["id"];
 	        this.name = source["name"];
+	        this.advancedSearch = source["advancedSearch"];
+	        this.maxQueryCharacters = source["maxQueryCharacters"];
 	    }
 	}
 
